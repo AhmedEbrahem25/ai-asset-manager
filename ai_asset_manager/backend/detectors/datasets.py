@@ -405,10 +405,15 @@ class ImageClassificationDetector(BaseDetector):
             else [ctx]
         )
 
+        # A class directory holds images and nothing else. Requiring that — rather than
+        # merely "contains images somewhere below" — is what stops a folder that simply
+        # *contains* several datasets from being claimed as one giant classification set,
+        # swallowing every real dataset beneath it. A parent of datasets has children
+        # with their own structure; a class folder is a leaf.
         class_dirs: list[str] = []
         for root in search_roots:
             for candidate in root.children():
-                if candidate.image_count > 0:
+                if candidate.direct_image_count > 0 and candidate.is_leaf:
                     class_dirs.append(candidate.name)
 
         unique_classes = sorted(set(class_dirs))

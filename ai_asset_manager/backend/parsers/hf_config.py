@@ -48,8 +48,11 @@ ARCHITECTURE_PATTERNS: tuple[tuple[tuple[str, ...], ModelType], ...] = (
     (("forsequenceclassification", "fortokenclassification", "forimageclassification",
       "vit", "swin", "convnext", "resnet", "efficientnet", "deit", "beit", "dinov2",
       "regnet", "mobilenet"), ModelType.CLASSIFICATION),
-    (("formaskedlm", "bertmodel", "robertamodel", "xlmroberta", "distilbert", "electra",
-      "deberta", "mpnet", "albert", "e5", "bge", "gte", "nomic", "jina"),
+    # Encoder-only checkpoints. `ForPreTraining` heads are included because a saved
+    # pretraining checkpoint is kept to be used as an encoder, not to keep pretraining.
+    (("formaskedlm", "forpretraining", "bertmodel", "robertamodel", "xlmroberta",
+      "distilbert", "electra", "deberta", "mpnet", "albert", "e5", "bge", "gte",
+      "nomic", "jina", "sentencetransformer"),
      ModelType.EMBEDDING),
     (("unet2dcondition", "stablediffusion", "flux", "sd3", "pixart", "kandinsky",
       "latentdiffusion", "autoencoderkl", "controlnet", "dit"), ModelType.IMAGE_GENERATION),

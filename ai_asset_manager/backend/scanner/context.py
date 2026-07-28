@@ -153,6 +153,21 @@ class DirectoryContext:
         """Return the number of image files in the subtree."""
         return self.content_class_counts.get("image", 0)
 
+    @cached_property
+    def direct_image_count(self) -> int:
+        """Return the number of images sitting *directly* in this directory.
+
+        Distinct from :attr:`image_count`, which counts the whole subtree. The difference
+        is what separates a class folder — images and nothing else — from a directory
+        that merely contains other datasets.
+        """
+        return sum(1 for entry in self.node.files if entry.content_class == "image")
+
+    @property
+    def is_leaf(self) -> bool:
+        """Report whether this directory has no subdirectories."""
+        return not self.node.child_dirs
+
     @property
     def video_count(self) -> int:
         """Return the number of video files in the subtree."""

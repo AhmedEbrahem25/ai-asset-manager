@@ -11,7 +11,7 @@ import sys
 import threading
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -28,6 +28,25 @@ from rich.table import Table
 from ai_asset_manager import __version__
 from ai_asset_manager.backend.database.engine import configure_engine, get_engine, session_scope
 from ai_asset_manager.backend.database.schema import init_database
+from ai_asset_manager.backend.inventory import (
+    GROUP_BY_FIELDS,
+    SORT_FIELDS,
+    InventoryEngine,
+    InventorySection,
+    available_formats,
+    export_report,
+    known_aliases,
+    resolve_alias,
+    suggest_filename,
+)
+from ai_asset_manager.backend.inventory.render import (
+    render_dataset_table,
+    render_details,
+    render_group_heading,
+    render_storage_breakdown,
+    render_summary,
+    render_table,
+)
 from ai_asset_manager.backend.models import Asset, ScanRun
 from ai_asset_manager.backend.scanner.progress import ScanContext, ScanPhase, ScanProgress
 from ai_asset_manager.backend.services.asset_service import AssetFilter, AssetService
@@ -482,6 +501,191 @@ def _detail_panel(asset: Asset) -> Panel:
         lines.extend(["", "Tags".ljust(14) + ", ".join(tag.name for tag in asset.tags)])
 
     return Panel("\n".join(lines), border_style="cyan", expand=False)
+
+
+@app.command()
+def inventory(
+    category: Annotated[
+        str,
+        typer.Argument(
+            help="What to list: all, models, datasets, llm, ocr, vision, speech, "
+            "embeddings, detection, segmentation, tracking, diffusion, adapters, "
+            "or any *-datasets variant.",
+        ),
+    ] = "all",
+    group_by: Annotated[
+        str | None,
+        typer.Option("--group-by", "-g", help=f"Group by: {', '.join(GROUP_BY_FIELDS)}."),
+    ] = None,
+    sort: Annotated[
+        str, typer.Option("--sort", help=f"Sort by: {', '.join(SORT_FIELDS)}.")
+    ] = "size",
+    ascending: Annotated[
+        bool, typer.Option("--asc", help="Sort ascending instead of descending.")
+    ] = False,
+    drive: Annotated[
+        str | None, typer.Option("--drive", help="Restrict to one drive, e.g. 'F:'.")
+    ] = None,
+    framework: Annotated[
+        str | None, typer.Option("--framework", help="Restrict to one framework.")
+    ] = None,
+    details: Annotated[
+        bool, typer.Option("--details", "-d", help="Show architecture, parameters and dates.")
+    ] = False,
+    limit: Annotated[
+        int | None, typer.Option("--limit", "-n", help="Show only the first N assets.")
+    ] = None,
+    include_missing: Annotated[
+        bool, typer.Option("--include-missing", help="Include assets no longer on disk.")
+    ] = False,
+    export: Annotated[
+        str | None,
+        typer.Option(
+            "--export",
+            help=f"Export instead of printing: {', '.join(available_formats())}.",
+        ),
+    ] = None,
+    output: Annotated[
+        Path | None, typer.Option("--output", "-o", help="File to write the export to.")
+    ] = None,
+    storage: Annotated[
+        bool, typer.Option("--storage", help="Also show the storage breakdown by drive.")
+    ] = False,
+) -> None:
+    """List everything in your local AI library, by category.
+
+    Reads only the catalogue built by 'aam scan' — no folders are walked and no files are
+    opened, so it answers instantly however large the library is. Strictly read-only.
+    """
+    categories = resolve_alias(category)
+    if categories is None:
+        error_console.print(
+            f"Unknown category {category!r}.\n"
+            f"Try one of: {', '.join(known_aliases())}"
+        )
+        raise typer.Exit(code=2)
+
+    # "all" means no restriction; passing the full category tuple would also filter out
+    # anything whose category is not yet in the taxonomy.
+    selected = None if category.strip().lower() == "all" else categories
+
+    with session_scope() as session:
+        report = InventoryEngine(session).build(
+            selected,
+            drives=[drive] if drive else None,
+            frameworks=[framework] if framework else None,
+            group_by=group_by,
+            sort=sort,
+            descending=not ascending,
+            include_missing=include_missing,
+            limit=limit,
+        )
+
+        if export:
+            _export_inventory(report, export, output, category)
+            return
+
+        if report.is_empty:
+            console.print(
+                f"[dim]No assets found for {category!r}. "
+                "Run 'aam scan <folder>' first, or try 'aam inventory all'.[/dim]"
+            )
+            return
+
+        console.print(render_summary(report))
+
+        if report.groups:
+            for group in report.groups:
+                console.print(render_group_heading(group))
+                console.print(_table_for(group.items, details=details))
+        else:
+            console.print()
+            console.print(_table_for(report.items, details=details))
+
+        if storage:
+            for axis in ("drive", "framework"):
+                breakdown = render_storage_breakdown(report, by=axis)
+                if breakdown is not None:
+                    console.print()
+                    console.print(breakdown)
+
+        if limit is not None and report.summary.total_assets > len(report.items):
+            console.print(
+                f"\n[dim]Showing {len(report.items)} of {report.summary.total_assets}. "
+                "Raise --limit to see more.[/dim]"
+            )
+
+
+def _table_for(items: Sequence[Any], *, details: bool) -> Table:
+    """Choose the layout that fits a set of items.
+
+    Detail mode gets per-asset blocks, since the full field set cannot be read as a row.
+    Otherwise datasets get their own columns — they have no architecture or parameter
+    count, and a shared layout would show them a row of blanks.
+    """
+    if details:
+        return render_details(items)
+    if items and all(item.section is InventorySection.DATASETS for item in items):
+        return render_dataset_table(items)
+    return render_table(items, show_details=False)
+
+
+def _export_inventory(
+    report: Any, fmt: str, output: Path | None, category: str
+) -> None:
+    """Write or print an inventory export."""
+    try:
+        destination = output or Path(suggest_filename(fmt, prefix=f"inventory-{category}"))
+        rendered = export_report(report, fmt, destination)
+    except ValueError as exc:
+        error_console.print(str(exc))
+        raise typer.Exit(code=2) from exc
+    except OSError as exc:
+        error_console.print(f"Cannot write {output}: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"[green]Exported[/green] {report.summary.total_assets} asset(s) "
+        f"({format_bytes(report.summary.total_bytes)}) to {destination}"
+    )
+    if len(rendered) < 400:
+        console.print(f"[dim]{rendered.strip()}[/dim]")
+
+
+@app.command()
+def where(
+    name: Annotated[str, typer.Argument(help="Part of an asset's name or path.")],
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Results to show.")] = 20,
+) -> None:
+    """Show where an asset is stored.
+
+    A direct answer to "I know I downloaded this — where did it go?".
+    """
+    with session_scope() as session:
+        matches = InventoryEngine(session).locate(name, limit=limit)
+
+        if not matches:
+            console.print(f"[dim]Nothing matching {name!r} in the catalogue.[/dim]")
+            return
+
+        table = Table(box=None, pad_edge=False, header_style="bold")
+        # Every column is bounded. An unbounded no-wrap column demands its full natural
+        # width, and Rich makes room by dropping other columns — losing Name, which is
+        # the one column that must always survive.
+        table.add_column("Name", style="cyan", min_width=12, max_width=34,
+                         overflow="ellipsis", no_wrap=True)
+        table.add_column("Category", max_width=18, overflow="ellipsis", no_wrap=True)
+        table.add_column("Size", justify="right", no_wrap=True)
+        table.add_column("Location", max_width=60, overflow="ellipsis", no_wrap=True)
+
+        for item in matches:
+            table.add_row(
+                item.name,
+                item.category_label,
+                format_bytes(item.size_bytes),
+                shorten_path(item.path, 60),
+            )
+        console.print(table)
 
 
 @app.command()

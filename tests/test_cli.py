@@ -17,8 +17,12 @@ from tests import factories as F
 
 @pytest.fixture
 def runner() -> CliRunner:
-    """Return a Typer test runner."""
-    return CliRunner()
+    """Return a Typer test runner with a fixed terminal width.
+
+    Rich adapts its tables to the terminal, so without a pinned width these assertions
+    would pass or fail depending on the window the suite happened to run in.
+    """
+    return CliRunner(env={"COLUMNS": "200", "TERM": "dumb"})
 
 
 @pytest.fixture
@@ -191,6 +195,128 @@ class TestRoots:
 
         assert result.exit_code == 0
         assert "No scan roots" in result.output
+
+
+class TestInventory:
+    def test_lists_everything_with_a_summary(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "inventory"])
+
+        assert result.exit_code == 0
+        assert "AI Asset Inventory" in result.output
+        assert "Total Assets" in result.output
+        assert "text-model" in result.output
+
+    @pytest.mark.parametrize("category", ["llm", "datasets", "models", "adapters", "all"])
+    def test_category_filters_run(self, catalogue, runner: CliRunner, category: str) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "inventory", category])
+
+        assert result.exit_code == 0
+
+    def test_llm_excludes_datasets(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "inventory", "llm"])
+
+        assert result.exit_code == 0
+        assert "coco" not in result.output
+
+    def test_unknown_category_reports_the_valid_ones(
+        self, catalogue, runner: CliRunner
+    ) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "inventory", "banana"])
+
+        assert result.exit_code == 2
+        assert "Unknown category" in result.output
+
+    def test_grouping(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(
+            app, ["--database", str(database), "inventory", "--group-by", "category"]
+        )
+
+        assert result.exit_code == 0
+        assert "asset(s)" in result.output
+
+    def test_details_mode(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(
+            app, ["--database", str(database), "inventory", "--details"]
+        )
+
+        assert result.exit_code == 0
+        assert "Root folder" in result.output
+        assert "Architecture" in result.output
+
+    def test_limit_reports_the_true_total(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(
+            app, ["--database", str(database), "inventory", "--limit", "1"]
+        )
+
+        assert result.exit_code == 0
+        assert "Showing 1 of" in result.output
+
+    @pytest.mark.parametrize(("fmt", "suffix"), [("csv", "csv"), ("json", "json"),
+                                                 ("markdown", "md")])
+    def test_exports(
+        self, catalogue, runner: CliRunner, tmp_path: Path, fmt: str, suffix: str
+    ) -> None:
+        _assets, database = catalogue
+        destination = tmp_path / f"inventory.{suffix}"
+
+        result = runner.invoke(
+            app,
+            ["--database", str(database), "inventory", "--export", fmt,
+             "--output", str(destination)],
+        )
+
+        assert result.exit_code == 0
+        assert destination.exists()
+        assert destination.read_text(encoding="utf-8").strip()
+
+    def test_unknown_export_format_exits_nonzero(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(
+            app, ["--database", str(database), "inventory", "--export", "pdf"]
+        )
+
+        assert result.exit_code == 2
+
+    def test_empty_catalogue_is_explained(self, tmp_path: Path, runner: CliRunner) -> None:
+        result = runner.invoke(
+            app, ["--database", str(tmp_path / "empty.db"), "inventory"]
+        )
+
+        assert result.exit_code == 0
+        assert "No assets found" in result.output
+
+
+class TestWhere:
+    def test_finds_an_asset(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "where", "coco"])
+
+        assert result.exit_code == 0
+        assert "coco" in result.output
+
+    def test_no_match_says_so(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "where", "zzzznope"])
+
+        assert result.exit_code == 0
+        assert "Nothing matching" in result.output
 
 
 def test_version(tmp_path: Path, runner: CliRunner) -> None:

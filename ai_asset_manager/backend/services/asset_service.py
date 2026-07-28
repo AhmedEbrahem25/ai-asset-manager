@@ -58,6 +58,8 @@ class AssetFilter:
     year: int | None = None
     health_status: str | None = None
     include_missing: bool = False
+    #: Assets to exclude outright, used by negated search terms such as ``-tag:archived``.
+    excluded_ids: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -136,6 +138,8 @@ class AssetService:
         """Attach filter clauses to a statement."""
         if not filters.include_missing:
             statement = statement.where(Asset.is_missing.is_(False))
+        if filters.excluded_ids:
+            statement = statement.where(Asset.id.not_in(filters.excluded_ids))
 
         if filters.kinds:
             statement = statement.where(Asset.kind.in_(filters.kinds))
