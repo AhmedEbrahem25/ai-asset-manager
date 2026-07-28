@@ -1,0 +1,39 @@
+[stderr] INFO:     Started server process [10332]
+[stderr] INFO:     Waiting for application startup.
+[stderr] INFO:     Application startup complete.
+[stderr] INFO:     Uvicorn running on http://127.0.0.1:8765 (Press CTRL+C to quit)
+INFO:     127.0.0.1:45001 - "GET /health HTTP/1.1" 200 OK
+[stderr] INFO:     ('127.0.0.1', 45002) - "WebSocket /ws" [accepted]
+[stderr] 2026-07-28 22:08:30 INFO     [codeboarding_pro.ws.server:258] WebSocket connected: session 9abfcf2e-e935-4f7a-9c6a-a6fd6d66c9d2
+[stderr] INFO:     connection open
+[stderr] 2026-07-28 22:08:30 INFO     [codeboarding_pro.lsp.bootstrap:56] LSP startup attempt 1/3
+[stderr] 2026-07-28 22:08:30 INFO     [codeboarding_pro.session:182] Session 9abfcf2e-e935-4f7a-9c6a-a6fd6d66c9d2 initialized: repo=F:\project\ai-asset-manager, project=ai-asset-manager, output=F:\project\ai-asset-manager\.codeboarding
+[stderr] 2026-07-28 22:08:30 WARNING  [codeboarding_pro.lsp.bootstrap:72] LSP startup attempt 1 failed: [WinError 193] %1 is not a valid Win32 application
+[stderr] Traceback (most recent call last):
+[stderr]   File "codeboarding_pro\lsp\bootstrap.py", line 57, in _run
+[stderr]   File "static_analyzer\__init__.py", line 175, in __init__
+[stderr]   File "static_analyzer\scanner.py", line 81, in scan
+[stderr]   File "subprocess.py", line 548, in run
+[stderr]   File "subprocess.py", line 1026, in __init__
+[stderr]   File "subprocess.py", line 1538, in _execute_child
+[stderr] OSError: [WinError 193] %1 is not a valid Win32 application
+[stderr] 2026-07-28 22:08:33 INFO     [codeboarding_pro.lsp.bootstrap:56] LSP startup attempt 2/3
+[stderr] 2026-07-28 22:08:33 WARNING  [codeboarding_pro.lsp.bootstrap:72] LSP startup attempt 2 failed: [WinError 193] %1 is not a valid Win32 application
+[stderr] Traceback (most recent call last):
+[stderr]   File "codeboarding_pro\lsp\bootstrap.py", line 57, in _run
+[stderr]   File "static_analyzer\__init__.py", line 175, in __init__
+[stderr]   File "static_analyzer\scanner.py", line 81, in scan
+[stderr]   File "subprocess.py", line 548, in run
+[stderr]   File "subprocess.py", line 1026, in __init__
+[stderr]   File "subprocess.py", line 1538, in _execute_child
+[stderr] OSError: [WinError 193] %1 is not a valid Win32 application
+[stderr] 2026-07-28 22:08:36 INFO     [codeboarding_pro.lsp.bootstrap:56] LSP startup attempt 3/3
+[stderr] 2026-07-28 22:08:37 WARNING  [codeboarding_pro.lsp.bootstrap:72] LSP startup attempt 3 failed: [WinError 193] %1 is not a valid Win32 application
+[stderr] Traceback (most recent call last):
+[stderr]   File "codeboarding_pro\lsp\bootstrap.py", line 57, in _run
+[stderr]   File "static_analyzer\__init__.py", line 175, in __init__
+[stderr]   File "static_analyzer\scanner.py", line 81, in scan
+[stderr]   File "subprocess.py", line 548, in run
+[stderr]   File "subprocess.py", line 1026, in __init__
+[stderr]   File "subprocess.py", line 1538, in _execute_child
+[stderr] OSError: [WinError 193] %1 is not a valid Win32 application
