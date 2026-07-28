@@ -29,11 +29,13 @@ from ai_asset_manager import __version__
 from ai_asset_manager.backend.database.engine import configure_engine, get_engine, session_scope
 from ai_asset_manager.backend.database.schema import init_database
 from ai_asset_manager.backend.inventory import (
+    DEFAULT_LEVELS,
     GROUP_BY_FIELDS,
     SORT_FIELDS,
+    TREE_LEVELS,
     InventoryEngine,
-    InventorySection,
     available_formats,
+    build_tree,
     export_report,
     known_aliases,
     resolve_alias,
@@ -42,10 +44,14 @@ from ai_asset_manager.backend.inventory import (
 from ai_asset_manager.backend.inventory.render import (
     render_dataset_table,
     render_details,
+    render_distribution,
+    render_fixes,
     render_group_heading,
+    render_health,
     render_storage_breakdown,
     render_summary,
     render_table,
+    render_tree,
 )
 from ai_asset_manager.backend.models import Asset, ScanRun
 from ai_asset_manager.backend.scanner.progress import ScanContext, ScanPhase, ScanProgress
@@ -510,7 +516,8 @@ def inventory(
         typer.Argument(
             help="What to list: all, models, datasets, llm, ocr, vision, speech, "
             "embeddings, detection, segmentation, tracking, diffusion, adapters, "
-            "or any *-datasets variant.",
+            "experiments, any *-datasets variant, or a domain such as medical. "
+            "Two special views: 'health' and 'missing'.",
         ),
     ] = "all",
     group_by: Annotated[
@@ -529,9 +536,22 @@ def inventory(
     framework: Annotated[
         str | None, typer.Option("--framework", help="Restrict to one framework.")
     ] = None,
+    task: Annotated[
+        str | None, typer.Option("--task", help="Restrict to one task, e.g. 'object_detection'.")
+    ] = None,
+    domain: Annotated[
+        str | None, typer.Option("--domain", help="Restrict to one domain, e.g. 'medical'.")
+    ] = None,
     details: Annotated[
-        bool, typer.Option("--details", "-d", help="Show architecture, parameters and dates.")
+        bool, typer.Option("--details", "-d", help="Show everything known about each asset.")
     ] = False,
+    tree: Annotated[
+        bool, typer.Option("--tree", "-t", help="Show the library as a tree.")
+    ] = False,
+    tree_by: Annotated[
+        str | None,
+        typer.Option("--tree-by", help=f"Tree nesting, comma-separated: {', '.join(TREE_LEVELS)}."),
+    ] = None,
     limit: Annotated[
         int | None, typer.Option("--limit", "-n", help="Show only the first N assets.")
     ] = None,
@@ -556,28 +576,39 @@ def inventory(
 
     Reads only the catalogue built by 'aam scan' — no folders are walked and no files are
     opened, so it answers instantly however large the library is. Strictly read-only.
-    """
-    categories = resolve_alias(category)
-    if categories is None:
-        error_console.print(
-            f"Unknown category {category!r}.\n"
-            f"Try one of: {', '.join(known_aliases())}"
-        )
-        raise typer.Exit(code=2)
 
-    # "all" means no restriction; passing the full category tuple would also filter out
-    # anything whose category is not yet in the taxonomy.
-    selected = None if category.strip().lower() == "all" else categories
+    Two views take the place of a category: 'health' scores every asset and lists what is
+    wrong with it, and 'missing' shows only the assets that need attention.
+    """
+    view = category.strip().lower()
+    health_view = view in ("health", "missing")
+
+    if health_view:
+        selected: Sequence[str] | None = None
+    else:
+        categories = resolve_alias(category)
+        if categories is None:
+            error_console.print(
+                f"Unknown category {category!r}.\n"
+                f"Try one of: {', '.join(known_aliases())}"
+            )
+            raise typer.Exit(code=2)
+        # "all" means no restriction; passing the full category tuple would also filter
+        # out anything whose category came from a plugin no longer installed.
+        selected = None if view == "all" else categories
 
     with session_scope() as session:
         report = InventoryEngine(session).build(
             selected,
             drives=[drive] if drive else None,
             frameworks=[framework] if framework else None,
+            tasks=[task] if task else None,
+            domains=[domain] if domain else None,
             group_by=group_by,
-            sort=sort,
+            sort="health" if health_view and sort == "size" else sort,
             descending=not ascending,
-            include_missing=include_missing,
+            include_missing=include_missing or health_view,
+            only_unhealthy=view == "missing",
             limit=limit,
         )
 
@@ -586,15 +617,36 @@ def inventory(
             return
 
         if report.is_empty:
-            console.print(
-                f"[dim]No assets found for {category!r}. "
-                "Run 'aam scan <folder>' first, or try 'aam inventory all'.[/dim]"
-            )
+            if view == "missing":
+                console.print(
+                    "[green]Nothing needs attention.[/green] "
+                    "[dim]Every catalogued asset is complete.[/dim]"
+                )
+            else:
+                console.print(
+                    f"[dim]No assets found for {category!r}. "
+                    "Run 'aam scan <folder>' first, or try 'aam inventory all'.[/dim]"
+                )
             return
 
         console.print(render_summary(report))
 
-        if report.groups:
+        if tree or tree_by:
+            levels = (
+                tuple(level.strip() for level in tree_by.split(",") if level.strip())
+                if tree_by
+                else DEFAULT_LEVELS
+            )
+            console.print()
+            console.print(render_tree(build_tree(report, levels=levels)))
+        elif health_view:
+            console.print()
+            console.print(render_health(report.items))
+            fixes = render_fixes(report.items)
+            if fixes is not None:
+                console.print()
+                console.print(fixes)
+        elif report.groups:
             for group in report.groups:
                 console.print(render_group_heading(group))
                 console.print(_table_for(group.items, details=details))
@@ -608,6 +660,11 @@ def inventory(
                 if breakdown is not None:
                     console.print()
                     console.print(breakdown)
+            for axis in ("task", "family"):
+                distribution = render_distribution(report, by=axis)
+                if distribution is not None:
+                    console.print()
+                    console.print(distribution)
 
         if limit is not None and report.summary.total_assets > len(report.items):
             console.print(
@@ -625,7 +682,7 @@ def _table_for(items: Sequence[Any], *, details: bool) -> Table:
     """
     if details:
         return render_details(items)
-    if items and all(item.section is InventorySection.DATASETS for item in items):
+    if items and all(item.is_dataset for item in items):
         return render_dataset_table(items)
     return render_table(items, show_details=False)
 

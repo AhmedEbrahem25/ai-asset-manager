@@ -255,6 +255,95 @@ class TestInventory:
         assert "Root folder" in result.output
         assert "Architecture" in result.output
 
+    def test_details_answers_what_each_asset_is_for(
+        self, catalogue, runner: CliRunner
+    ) -> None:
+        """The success criterion for the whole feature.
+
+        After one command a user should know what each asset does, where it is and
+        whether it is complete.
+        """
+        _assets, database = catalogue
+
+        result = runner.invoke(
+            app, ["--database", str(database), "inventory", "--details"]
+        )
+
+        assert result.exit_code == 0
+        for expected in ("Task", "Domain", "Health", "Path", "Identified by"):
+            assert expected in result.output
+
+    def test_tree_view(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "inventory", "--tree"])
+
+        assert result.exit_code == 0
+        assert "AI Library" in result.output
+        assert "Models" in result.output
+        assert "text-model" in result.output
+
+    def test_tree_nesting_can_be_chosen(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(
+            app, ["--database", str(database), "inventory", "--tree-by", "domain,task"]
+        )
+
+        assert result.exit_code == 0
+        assert "AI Library" in result.output
+
+    def test_health_view(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "inventory", "health"])
+
+        assert result.exit_code == 0
+        assert "Score" in result.output
+        assert "/100" in result.output
+
+    def test_missing_view_lists_only_problems(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "inventory", "missing"])
+
+        assert result.exit_code == 0
+        # Either it found something to fix, or it said there was nothing to fix. Silence
+        # would be the failure.
+        assert "Findings" in result.output or "Nothing needs attention" in result.output
+
+    def test_missing_on_a_clean_catalogue_says_so(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        database = tmp_path / "empty.db"
+
+        result = runner.invoke(app, ["--database", str(database), "inventory", "missing"])
+
+        assert result.exit_code == 0
+        assert "Nothing needs attention" in result.output
+
+    def test_task_filter(self, catalogue, runner: CliRunner) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(
+            app, ["--database", str(database), "inventory", "--task", "object_detection"]
+        )
+
+        assert result.exit_code == 0
+
+    def test_storage_breakdown_includes_task_distribution(
+        self, catalogue, runner: CliRunner
+    ) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(
+            app, ["--database", str(database), "inventory", "--storage"]
+        )
+
+        assert result.exit_code == 0
+        assert "Storage by drive" in result.output
+        assert "Assets by task" in result.output
+
     def test_limit_reports_the_true_total(self, catalogue, runner: CliRunner) -> None:
         _assets, database = catalogue
 

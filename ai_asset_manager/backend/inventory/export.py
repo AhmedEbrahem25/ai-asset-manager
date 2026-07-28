@@ -25,20 +25,34 @@ from ai_asset_manager.backend.utils.humanize import format_bytes, format_count
 #: "4.9 GiB" cannot be totalled and one that only has 5261334528 cannot be skimmed.
 CSV_COLUMNS = (
     "name",
+    "section",
     "category",
+    "task",
+    "domain",
+    "family",
     "subcategory",
     "framework",
     "architecture",
     "format",
+    "storage_format",
     "parameters",
     "parameters_exact",
     "quantization",
+    "precision",
+    "context_length",
     "dataset_type",
+    "modalities",
     "size_bytes",
     "size_human",
     "file_count",
     "images",
+    "videos",
+    "annotations",
     "classes",
+    "splits",
+    "health_score",
+    "health_status",
+    "health_findings",
     "drive",
     "root_folder",
     "path",
@@ -99,7 +113,7 @@ class MarkdownExporter:
     extension = "md"
 
     #: Table columns, chosen to stay readable at a typical document width.
-    COLUMNS = ("Name", "Category", "Framework", "Format", "Size", "Location")
+    COLUMNS = ("Name", "Category", "Task", "Family", "Size", "Health", "Location")
 
     def render(self, report: InventoryReport) -> str:
         """Return the report as a Markdown document."""
@@ -141,6 +155,10 @@ class MarkdownExporter:
         lines.append(f"- **Total storage**: {format_bytes(summary.total_bytes)}")
         if summary.physical_bytes and summary.physical_bytes != summary.total_bytes:
             lines.append(f"- **On disk**: {format_bytes(summary.physical_bytes)}")
+        if summary.average_health is not None:
+            lines.append(f"- **Average health**: {summary.average_health}/100")
+        if summary.unhealthy_assets:
+            lines.append(f"- **Need attention**: {summary.unhealthy_assets}")
         lines.append("")
         return lines
 
@@ -154,15 +172,17 @@ class MarkdownExporter:
             "|" + "|".join("---" for _ in self.COLUMNS) + "|",
         ]
         for item in items:
+            score = item.health_score
             lines.append(
                 "| "
                 + " | ".join(
                     (
                         _escape_md(item.name),
                         item.category_label,
-                        item.framework,
-                        item.format,
+                        item.task_label or "—",
+                        _escape_md(item.family or "—"),
                         format_bytes(item.size_bytes),
+                        f"{score}/100" if score is not None else "—",
                         f"`{item.path}`",
                     )
                 )
@@ -230,22 +250,49 @@ def suggest_filename(fmt: str, *, prefix: str = "inventory") -> str:
 
 def _flat_row(item: InventoryItem) -> dict[str, object]:
     """Flatten an item into CSV columns."""
+    health = item.health
+    findings = (
+        "; ".join(finding.message for finding in health.findings)
+        if health is not None and health.evaluated
+        else ""
+    )
+    counts: dict[str, int] = item.stat("split_counts") or item.splits
+    splits_text = (
+        ";".join(f"{name}={count}" for name, count in counts.items())
+        if counts
+        else ";".join(item.stat("splits") or ())
+    )
+
     return {
         "name": item.name,
+        "section": item.section,
         "category": item.category_label,
+        "task": item.task_label,
+        "domain": item.domain_label,
+        "family": item.family or "",
         "subcategory": item.subcategory or "",
         "framework": item.framework,
         "architecture": item.architecture or "",
         "format": item.format,
+        "storage_format": item.stat("storage_format", "") or "",
         "parameters": item.param_count or "",
         "parameters_exact": "yes" if item.param_count_is_exact else "",
         "quantization": item.quantization or "",
+        "precision": item.precision or "",
+        "context_length": item.context_length or "",
         "dataset_type": item.dataset_type or "",
+        "modalities": ";".join(item.modalities),
         "size_bytes": item.size_bytes,
         "size_human": format_bytes(item.size_bytes),
         "file_count": item.file_count,
         "images": item.num_images or "",
+        "videos": item.num_videos or "",
+        "annotations": item.num_annotations or int(item.stat("annotations", 0) or 0) or "",
         "classes": item.num_classes or "",
+        "splits": splits_text,
+        "health_score": item.health_score if item.health_score is not None else "",
+        "health_status": item.health_status,
+        "health_findings": findings,
         "drive": item.drive or "",
         "root_folder": item.root_folder,
         "path": item.path,

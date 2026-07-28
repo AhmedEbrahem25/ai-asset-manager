@@ -7,9 +7,11 @@ Point it at your folders. It figures out what everything is.
 
 ```console
 $ aam scan D:\Models E:\LLMs F:\Datasets
-$ aam search "llama quantization:Q4_K_M"
-$ aam duplicates --min-size 1GB
-$ aam desktop
+$ aam inventory              # what do I have, and what is it for?
+$ aam inventory ocr          # which OCR models are installed?
+$ aam inventory missing      # what is incomplete or broken?
+$ aam inventory --tree       # the shape of the whole library
+$ aam where qwen             # I know I downloaded it - where did it go?
 ```
 
 ## Why
@@ -40,6 +42,82 @@ ImageNet, KITTI, Waymo, nuScenes, BDD100K, Cityscapes, MOT, CrowdHuman, Open Ima
 ADE20K, LVIS, HuggingFace datasets, plus generic classification, segmentation, tracking,
 video, audio and NLP corpora.
 
+## Inventory
+
+`aam inventory` is the catalogue's read side: what you own, what each thing is *for*, and
+whether any of it is broken. It reads the database and nothing else — no folder is walked
+and no file is opened, so it answers instantly however large the library is, and it is
+strictly read-only. Nothing in this feature can move, rename or delete anything.
+
+```console
+$ aam inventory
+┌────── AI Asset Inventory ───────┐
+│ OCR Model          4   14.6 GiB │
+│ LLM                3    6.9 GiB │
+│ Vision-Language    1    2.3 GiB │
+│ Embedding          2    1.0 GiB │
+│ ...                             │
+│ Total Assets      16            │
+│ Total Storage          25.6 GiB │
+│ Health            98/100        │
+│ Need attention     2            │
+└─────────────────────────────────┘
+```
+
+Every asset gets a **category** (which shelf it belongs on), a **task** (what it does), a
+**domain**, a **family**, statistics drawn from its recorded file list, and a **health
+score** with specific findings.
+
+| Command | Answers |
+|---|---|
+| `aam inventory [category]` | What do I have? Any alias, section, or domain — `llm`, `ocr`, `vision`, `datasets`, `medical`, `experiments`. |
+| `aam inventory --details` | Everything known about each asset, as readable records. |
+| `aam inventory --tree` | How is the library shaped? Section → category → family. |
+| `aam inventory health` | Score and findings for every asset, plus what to do about them. |
+| `aam inventory missing` | Only what needs attention. |
+| `aam inventory --group-by task\|domain\|family\|drive\|…` | Cut it a different way. |
+| `aam inventory --export csv\|json\|markdown` | Take it elsewhere. |
+| `aam where <name>` | Where did I put it? |
+
+Health findings are derived from the file list the scanner recorded, which is why they cost
+nothing to compute. A sharded model states its expected shard count in every filename, so
+`model-00002-of-00004.safetensors` with three siblings missing is provably an unfinished
+download — the kind of failure that looks perfectly healthy in a file browser and only
+surfaces when something tries to load it.
+
+## Extending the taxonomy
+
+Nothing the inventory knows is hard-coded in its core. Categories, tasks, domains,
+modalities, classifiers, health rules and statistics all come from plugins under
+`ai_asset_manager/backend/taxonomy/plugins/`. Supporting a new AI domain means adding one
+file there — the scanner, the inventory engine, the database schema and the CLI are all
+untouched:
+
+```python
+def register(registry: TaxonomyRegistry) -> None:
+    registry.add_domain(Domain(id="bioinformatics", label="Bioinformatics"))
+    registry.add_category(Category(
+        id="genomics_dataset", label="Genomics Dataset", section="datasets",
+        order=400, domain="bioinformatics", aliases=("genomics",),
+    ))
+
+    @registry.classifier(priority=600, name="genomics")
+    def _genomics(profile: AssetProfile) -> Classification | None:
+        if profile.files.count(".fastq", ".bam", ".vcf"):
+            return Classification(category="genomics_dataset", task="variant_calling",
+                                  domain="bioinformatics", evidence="sequencing files")
+        return None
+```
+
+`aam inventory genomics` works immediately, and so does `aam inventory datasets` — section
+and domain selectors are resolved live rather than from a stored list. Distributions
+outside this repository can register the same way through the `ai_asset_manager.taxonomy`
+entry-point group.
+
+A plugin receives an `AssetProfile` and nothing else: no session, no paths, no file
+handles. It therefore *cannot* make the inventory slow or unsafe, which is what lets the
+read-only guarantee survive plugins this project has never seen.
+
 ## Design notes
 
 **No heavyweight ML dependencies.** Every format is parsed from raw bytes — there is no
@@ -64,6 +142,12 @@ resolved before anything is called a duplicate.
 
 **Rescans are incremental.** Each asset carries a fingerprint over its files' sizes and
 modification times; unchanged assets skip detection and parsing entirely.
+
+**The inventory reads the catalogue, never the disk.** Every question it answers — what a
+dataset contains, whether a model's shards are all present, which splits exist — is a
+question about the file list the scanner already wrote down. The test that proves it
+deletes every scanned file and asserts the report still comes back complete, classified and
+health-scored.
 
 ## Status
 

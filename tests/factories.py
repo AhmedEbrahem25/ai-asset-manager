@@ -14,8 +14,16 @@ import json
 import math
 import os
 import struct
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+from ai_asset_manager.backend.taxonomy.types import (
+    AssetProfile,
+    DatasetFacts,
+    FileSummary,
+    ModelFacts,
+)
 
 # --------------------------------------------------------------------------
 # Binary formats
@@ -554,3 +562,79 @@ def make_duplicate_pair(root: Path, *, size: int = 64 * 1024) -> tuple[Path, Pat
         (directory / "model.bin").write_bytes(payload)
         created.append(directory)
     return created[0], created[1]
+
+
+# --------------------------------------------------------------------------
+# Taxonomy profiles
+# --------------------------------------------------------------------------
+
+
+def make_profile(
+    name: str,
+    *,
+    kind: str = "model",
+    files: Sequence[str] = (),
+    file_sizes: Mapping[str, int] | None = None,
+    framework: str = "unknown",
+    asset_format: str = "unknown",
+    model: Mapping[str, Any] | None = None,
+    dataset: Mapping[str, Any] | None = None,
+    **overrides: Any,
+) -> AssetProfile:
+    """Build an :class:`AssetProfile` the way the engine would, without a database.
+
+    Classifiers and health rules take a profile and nothing else, so this is all a test
+    needs to exercise them. ``files`` is a list of relative paths; passing any makes the
+    summary count as loaded, which is what the health rules check before reporting.
+    """
+    summary = FileSummary()
+    if files:
+        sizes = dict(file_sizes or {})
+        by_extension: dict[str, int] = {}
+        bytes_by_extension: dict[str, int] = {}
+        names: set[str] = set()
+        directories: set[str] = set()
+        top_level: set[str] = set()
+        relpaths: list[str] = []
+
+        for relpath in files:
+            normalised = relpath.replace("\\", "/").lower()
+            size = sizes.get(relpath, 1024)
+            relpaths.append(normalised)
+            segments = normalised.split("/")
+            names.add(segments[-1])
+            if len(segments) > 1:
+                directories.update(segments[:-1])
+                top_level.add(segments[0])
+            _, dot, tail = segments[-1].rpartition(".")
+            if dot and tail:
+                suffix = f".{tail}"
+                by_extension[suffix] = by_extension.get(suffix, 0) + 1
+                bytes_by_extension[suffix] = bytes_by_extension.get(suffix, 0) + size
+
+        summary = FileSummary(
+            total=len(files),
+            total_bytes=sum(sizes.get(relpath, 1024) for relpath in files),
+            loaded=True,
+            names=frozenset(names),
+            by_extension=by_extension,
+            bytes_by_extension=bytes_by_extension,
+            directories=frozenset(directories),
+            top_level=frozenset(top_level),
+            relpaths=tuple(relpaths),
+        )
+
+    return AssetProfile(
+        asset_id=overrides.pop("asset_id", 1),
+        kind=kind,
+        name=name,
+        path=overrides.pop("path", rf"F:\library\{name}"),
+        framework=framework,
+        format=asset_format,
+        file_count=summary.total,
+        size_bytes=summary.total_bytes,
+        model=ModelFacts(**model) if model is not None else None,
+        dataset=DatasetFacts(**dataset) if dataset is not None else None,
+        files=summary,
+        **overrides,
+    )
