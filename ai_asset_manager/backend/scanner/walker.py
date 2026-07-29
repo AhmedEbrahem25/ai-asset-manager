@@ -52,7 +52,9 @@ def _scan_directory(
                 try:
                     is_symlink = entry.is_symlink()
                     if entry.is_dir(follow_symlinks=settings.follow_symlinks):
-                        if is_excluded_dir(entry.name, settings.excluded_dirs):
+                        if is_excluded_dir(
+                            entry.name, settings.excluded_dirs, entry.path
+                        ):
                             continue
                         if is_symlink and not settings.follow_symlinks:
                             continue

@@ -37,12 +37,47 @@ DEFAULT_EXCLUDED_DIRS: frozenset[str] = frozenset(
         "env",
         "site-packages",
         "dist-packages",
+        # Operating-system and vendor trees. Excluding `windows` alone is not enough:
+        # pointing a scan at `C:\` walks `Program Files`, `ProgramData` and every installed
+        # application, and on the development machine that had not finished after twenty
+        # minutes. Discovery has always refused to enter these; the scanner now agrees.
+        #
+        # This is a default for *walks that reach them*, not a prohibition. Naming a path
+        # explicitly still scans it, because the walker only checks the names of
+        # directories it discovers, never the root it was given -- so
+        # `aam scan "C:\Program Files\SomeApp"` works exactly as asked.
         "$recycle.bin",
         "system volume information",
         "windows",
         "$windows.~ws",
         "$windows.~bt",
+        "$winreagent",
+        "program files",
+        "program files (x86)",
+        "programdata",
+        "perflogs",
+        "msocache",
+        "config.msi",
+        "recovery",
         "appdata\\local\\temp",
+        # Browser, Electron and package-manager caches. Universally large, universally
+        # worthless to a catalogue, and the reason a whole-drive walk spends its time in
+        # AppData: over a million files on the development machine, none of them an asset.
+        # Discovery has always refused to enter these.
+        "cache2",
+        "code cache",
+        "gpucache",
+        "service worker",
+        "crashpad_reports",
+        "webcache",
+        "inetcache",
+        "temporary internet files",
+        ".npm",
+        ".nuget",
+        ".cargo",
+        ".rustup",
+        ".pnpm-store",
+        ".yarn",
         ".trash",
         ".trash-1000",
         "lost+found",

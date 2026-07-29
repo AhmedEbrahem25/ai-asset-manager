@@ -114,13 +114,34 @@ def get_drive(path: str | os.PathLike[str]) -> str | None:
     return "/"
 
 
-def is_excluded_dir(name: str, excluded: frozenset[str]) -> bool:
-    """Report whether a directory name should be pruned from the walk.
+def is_excluded_dir(
+    name: str, excluded: frozenset[str], path: str | None = None
+) -> bool:
+    r"""Report whether a directory should be pruned from the walk.
 
-    Compared case-insensitively because Windows treats ``Node_Modules`` and
-    ``node_modules`` as the same directory.
+    Two kinds of entry, and the difference matters:
+
+    A bare name (``node_modules``) prunes that directory wherever it appears. Compared
+    case-insensitively, because Windows treats ``Node_Modules`` and ``node_modules`` as
+    the same directory.
+
+    An entry containing a separator (``appdata\local\temp``) prunes only that *location*,
+    so a folder legitimately called ``temp`` inside a dataset is still walked. This needs
+    the full path, and silently did nothing until it got one: the entry sat in the default
+    list looking effective while the temp directory -- 138,000 files on the development
+    machine -- was walked on every scan.
     """
-    return name.lower() in excluded
+    if name.lower() in excluded:
+        return True
+    if path is None:
+        return False
+
+    normalised = path.replace("/", "\\").lower()
+    return any(
+        normalised.endswith("\\" + item)
+        for item in excluded
+        if "\\" in item
+    )
 
 
 def matches_any_glob(name: str, patterns: tuple[str, ...] | list[str]) -> bool:

@@ -280,3 +280,64 @@ class TestKnownLocations:
         assert (tmp_path / "Models").resolve() in found
         assert (tmp_path / "Models" / "nested").resolve() not in found
         assert (tmp_path / "Unrelated").resolve() not in found
+
+
+class TestDirectoryExclusion:
+    r"""The walk's pruning rules.
+
+    Two kinds of entry, and until this was fixed only one of them worked: a path-shaped
+    entry sat in the default list looking effective while matching nothing at all.
+    """
+
+    def test_a_bare_name_prunes_that_directory_anywhere(self) -> None:
+        from ai_asset_manager.backend.utils.paths import is_excluded_dir
+
+        excluded = frozenset({"node_modules"})
+
+        assert is_excluded_dir("node_modules", excluded, r"D:\app\node_modules")
+        assert is_excluded_dir("Node_Modules", excluded, r"D:\app\Node_Modules")
+        assert not is_excluded_dir("models", excluded, r"D:\app\models")
+
+    def test_a_path_shaped_entry_prunes_only_that_location(self) -> None:
+        r"""``appdata\local\temp`` must not prune a dataset's own ``temp`` folder."""
+        from ai_asset_manager.backend.utils.paths import is_excluded_dir
+
+        excluded = frozenset({"appdata\\local\\temp"})
+
+        assert is_excluded_dir(
+            "Temp", excluded, r"C:\Users\pc\AppData\Local\Temp"
+        )
+        assert not is_excluded_dir("temp", excluded, r"F:\Datasets\coco\temp")
+
+    def test_a_path_shaped_entry_needs_the_path(self) -> None:
+        # The regression itself: name-only comparison can never match a path entry, so
+        # the temp directory was walked on every scan for want of one argument.
+        from ai_asset_manager.backend.utils.paths import is_excluded_dir
+
+        excluded = frozenset({"appdata\\local\\temp"})
+
+        assert is_excluded_dir("Temp", excluded) is False
+        assert is_excluded_dir("Temp", excluded, r"C:\Users\pc\AppData\Local\Temp") is True
+
+    def test_separators_are_normalised(self) -> None:
+        from ai_asset_manager.backend.utils.paths import is_excluded_dir
+
+        excluded = frozenset({"appdata\\local\\temp"})
+
+        assert is_excluded_dir("temp", excluded, "C:/Users/pc/AppData/Local/Temp")
+
+    def test_the_walker_honours_a_path_shaped_exclusion(self, tmp_path, settings) -> None:
+        from ai_asset_manager.backend.scanner.walker import walk_tree
+
+        (tmp_path / "AppData" / "Local" / "Temp" / "junk").mkdir(parents=True)
+        (tmp_path / "AppData" / "Local" / "Temp" / "junk" / "a.bin").write_bytes(b"0")
+        (tmp_path / "Datasets" / "temp").mkdir(parents=True)
+
+        tuned = settings.model_copy(
+            update={"excluded_dirs": frozenset({"appdata\\local\\temp"})}
+        )
+        tree = walk_tree(tmp_path, settings=tuned)
+
+        walked = set(tree.nodes)
+        assert str(tmp_path / "AppData" / "Local" / "Temp") not in walked
+        assert str(tmp_path / "Datasets" / "temp") in walked
