@@ -145,7 +145,22 @@ class Settings(BaseSettings):
         default=False,
         description="Reserved for HuggingFace enrichment; the app never requires network.",
     )
+    # -- live indexing ------------------------------------------------------
+    #: How long filesystem events must stop before a batch is processed.
     watch_debounce_seconds: float = Field(default=2.0, ge=0.1, le=60.0)
+    #: Process a batch anyway once its oldest event is this old. Without a ceiling, a
+    #: multi-gigabyte download that writes continuously for minutes would hold every
+    #: change back until it finished, and the inventory would be stale the whole time.
+    watch_max_wait_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
+
+    #: Run a quick incremental scan before commands that read the catalogue, so the
+    #: inventory reflects the disk without the user remembering to rescan.
+    auto_scan: bool = Field(default=True)
+    #: Do not repeat that scan more often than this. A user running several commands in a
+    #: row should pay for it once, not once per command.
+    auto_scan_interval_seconds: float = Field(default=900.0, ge=0.0)
+    #: Offer to catalogue discovered locations on first use.
+    auto_discover: bool = Field(default=True)
 
     @field_validator("excluded_dirs", mode="before")
     @classmethod

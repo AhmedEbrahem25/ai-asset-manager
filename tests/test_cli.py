@@ -113,6 +113,151 @@ class TestFirstImpression:
         assert "--auto" in result.output
 
 
+class TestDiscoverAndStatus:
+    @pytest.fixture(autouse=True)
+    def isolated_state(self, tmp_path: Path, monkeypatch):
+        """Keep discovery's memory inside the test's own directory."""
+        monkeypatch.setattr(
+            "ai_asset_manager.backend.state.state_path", lambda: tmp_path / "state.json"
+        )
+
+    def test_discover_offers_and_adds(self, tmp_path: Path, runner: CliRunner,
+                                      monkeypatch) -> None:
+        cache = tmp_path / "hf"
+        cache.mkdir()
+        monkeypatch.setenv("HF_HOME", str(cache))
+
+        result = runner.invoke(
+            app,
+            ["--database", str(tmp_path / "db.sqlite"), "discover", "--yes", "--no-scan",
+             "--no-sweep"],
+        )
+
+        assert result.exit_code == 0
+        assert "Found AI assets" in result.output
+        assert "Added" in result.output
+
+    def test_discover_scans_nothing_when_declined(
+        self, tmp_path: Path, runner: CliRunner, monkeypatch
+    ) -> None:
+        # Nothing is scanned before approval. That is the whole contract of the prompt.
+        cache = tmp_path / "hf"
+        cache.mkdir()
+        monkeypatch.setenv("HF_HOME", str(cache))
+
+        result = runner.invoke(
+            app,
+            ["--database", str(tmp_path / "db.sqlite"), "discover", "--no-sweep"],
+            input="N\n",
+        )
+
+        assert result.exit_code == 0
+        assert "Nothing added" in result.output
+
+    def test_discover_remembers_it_ran(self, tmp_path: Path, runner: CliRunner,
+                                       monkeypatch) -> None:
+        cache = tmp_path / "hf"
+        cache.mkdir()
+        monkeypatch.setenv("HF_HOME", str(cache))
+        database = str(tmp_path / "db.sqlite")
+
+        runner.invoke(app, ["--database", database, "discover", "--no-sweep"], input="N\n")
+        again = runner.invoke(app, ["--database", database, "discover", "--no-sweep"])
+
+        assert "Nothing new" in again.output
+        assert "previously declined" in again.output
+
+    def test_status_reports_an_empty_installation(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(app, ["--database", str(tmp_path / "db.sqlite"), "status"])
+
+        assert result.exit_code == 0
+        assert "Last scan" in result.output
+        assert "never" in result.output
+        assert "No managed folders" in result.output
+
+    def test_status_reports_a_catalogue(self, catalogue, runner: CliRunner) -> None:
+        assets, database = catalogue
+        # The shared fixture scans without registering, which is a legitimate way to use
+        # the tool; managed folders only appear once something is remembered.
+        runner.invoke(app, ["--database", str(database), "roots", "add", str(assets)])
+
+        result = runner.invoke(app, ["--database", str(database), "status"])
+
+        assert result.exit_code == 0
+        assert "Managed folders" in result.output
+        assert "Watcher" in result.output
+        assert "not running" in result.output
+        assert "Taxonomy" in result.output
+
+    def test_status_says_when_nothing_is_remembered(
+        self, catalogue, runner: CliRunner
+    ) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "status"])
+
+        assert result.exit_code == 0
+        assert "No managed folders" in result.output
+
+    def test_watch_status_with_nothing_running(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(
+            app, ["--database", str(tmp_path / "db.sqlite"), "watch", "--status"]
+        )
+
+        assert result.exit_code == 0
+        assert "Not running" in result.output
+
+    def test_watch_stop_with_nothing_running(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(
+            app, ["--database", str(tmp_path / "db.sqlite"), "watch", "--stop"]
+        )
+
+        assert result.exit_code == 0
+        assert "No watcher is running" in result.output
+
+    def test_watch_refuses_with_nothing_to_watch(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(app, ["--database", str(tmp_path / "db.sqlite"), "watch"])
+
+        assert result.exit_code == 1
+        assert "discover" in result.output
+
+    def test_a_stale_watcher_pid_is_not_reported_as_running(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        """A watcher that was killed leaves its pid behind; status must not believe it."""
+        from ai_asset_manager.backend.state import AppState, save_state
+
+        state = AppState()
+        state.watcher_pid = 4_000_000_000
+        save_state(state)
+
+        result = runner.invoke(
+            app, ["--database", str(tmp_path / "db.sqlite"), "watch", "--status"]
+        )
+
+        assert "Not running" in result.output
+
+    def test_scan_rejects_contradictory_flags(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(
+            app,
+            ["--database", str(tmp_path / "db.sqlite"), "scan", str(tmp_path),
+             "--full", "--incremental"],
+        )
+
+        assert result.exit_code == 2
+        assert "opposite" in result.output
+
+
 class TestScan:
     def test_reports_what_it_found(self, tmp_path: Path, runner: CliRunner) -> None:
         assets = tmp_path / "assets"

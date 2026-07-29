@@ -42,6 +42,60 @@ ImageNet, KITTI, Waymo, nuScenes, BDD100K, Cityscapes, MOT, CrowdHuman, Open Ima
 ADE20K, LVIS, HuggingFace datasets, plus generic classification, segmentation, tracking,
 video, audio and NLP corpora.
 
+## Staying up to date
+
+You should not have to remember where anything is, or that a scan is due.
+
+**`aam discover`** finds it for you. It knows where thirty-odd tools keep their downloads —
+HuggingFace, Ollama, ComfyUI, Automatic1111, InvokeAI, LM Studio, llama.cpp, vLLM, PaddleOCR,
+EasyOCR, Tesseract, Ultralytics, MMDetection, Detectron2, Whisper, TensorFlow Hub, Keras,
+NGC, FiftyOne, CVAT, Label Studio, Roboflow, W&B, MLflow, TensorBoard and the rest — honours
+the environment variables people set when a cache outgrows its drive, and glances two levels
+below each drive root for folders named like a model library. **Nothing is scanned until you
+approve it.**
+
+```console
+$ aam discover
+Found AI assets
+
+Model caches
+  1  HuggingFace     C:\Users\pc\.cache\huggingface
+  2  Ollama          C:\Users\pc\.ollama
+  3  PyTorch Hub     C:\Users\pc\.cache\torch
+Speech
+  4  Whisper         C:\Users\pc\.cache\whisper
+
+Add these to your AI library? [Y]es / [N]o / [E]dit:
+```
+
+It runs once. Declining is remembered, so you are not asked again; `aam discover --all`
+re-offers what you turned down.
+
+**`aam watch`** keeps the catalogue in step as files change. Events are debounced, so
+copying a thousand files produces one update rather than a thousand, and each update
+rescans only the subtree that actually changed:
+
+```console
+$ aam watch
+Watching 1 folder(s):
+  C:\Users\pc\.cache\huggingface
+03:43:19  1 new across 1 location(s) in 0.0s
+03:43:42  1 gone across 1 location(s) in 0.0s
+```
+
+Ctrl-C stops it, or `aam watch --stop` from another terminal. A deleted asset is *marked*
+missing rather than deleted, so unplugging a drive does not destroy its catalogue.
+
+**Between the two**, commands that read the catalogue run a quick incremental catch-up
+first — skipped when a watcher is already running, rate-limited so four commands in a row
+cost one scan, and silent unless something changed. `aam status` reports the lot:
+
+| Command | Answers |
+|---|---|
+| `aam status` | What is managed, when it was last scanned, whether a watcher is live, database size, plugin count. |
+| `aam watch --status` | Is a watcher running, and over what. |
+| `aam scan --full` | Re-parse everything, ignoring fingerprints. |
+
 ## Inventory
 
 `aam inventory` is the catalogue's read side: what you own, what each thing is *for*, and

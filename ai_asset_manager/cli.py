@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -24,6 +26,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.table import Table
+from sqlalchemy import select
 
 from ai_asset_manager import __version__
 from ai_asset_manager.backend.database.engine import configure_engine, get_engine, session_scope
@@ -56,6 +59,7 @@ from ai_asset_manager.backend.inventory.render import (
 from ai_asset_manager.backend.models import Asset, ScanRun
 from ai_asset_manager.backend.scanner.progress import ScanContext, ScanPhase, ScanProgress
 from ai_asset_manager.backend.services.asset_service import AssetFilter, AssetService
+from ai_asset_manager.backend.services.discovery_service import DiscoveryService
 from ai_asset_manager.backend.services.scan_service import ScanService
 from ai_asset_manager.backend.utils.humanize import (
     format_bytes,
@@ -66,7 +70,7 @@ from ai_asset_manager.backend.utils.humanize import (
 )
 from ai_asset_manager.backend.utils.paths import shorten_path
 from ai_asset_manager.config import get_settings
-from ai_asset_manager.logging_conf import configure_logging
+from ai_asset_manager.logging_conf import configure_logging, get_logger
 
 #: Help panels, so that twelve commands read as three short groups rather than one long
 #: alphabetical list. Which group a command is in is the first thing that tells a new user
@@ -111,6 +115,11 @@ app.add_typer(roots_app, name="roots", rich_help_panel=PANEL_START)
 # command with a UnicodeEncodeError.
 console = Console(soft_wrap=False)
 error_console = Console(stderr=True, style="bold red")
+logger = get_logger(__name__)
+
+#: The database the user asked for with --database, so that commands reporting where
+#: data lives report the file actually in use rather than the configured default.
+_database_override: Path | None = None
 
 
 #: Commands that answer without touching the catalogue. They must not create one:
@@ -118,11 +127,21 @@ error_console = Console(stderr=True, style="bold red")
 #: database and a data directory behind on a machine it may never run on again.
 COMMANDS_WITHOUT_DATABASE = frozenset({"version"})
 
+#: Commands that must not trigger the automatic catch-up scan. Either they do their own
+#: scanning, or they are meant to report the catalogue exactly as it stands - `status`
+#: silently rescanning before reporting "last scan: just now" would be a lie about itself.
+COMMANDS_WITHOUT_AUTO_SCAN = frozenset(
+    {"version", "guide", "status", "scan", "watch", "discover", "roots"}
+)
+
 
 def _bootstrap(
     *, verbose: bool = False, database: Path | None = None, schema: bool = True
 ) -> None:
     """Configure logging and, unless told otherwise, ensure the database exists."""
+    global _database_override
+    _database_override = database
+
     settings = get_settings()
     configure_logging(
         "DEBUG" if verbose else settings.log_level,
@@ -173,6 +192,63 @@ def main_callback(
         _welcome(database)
         raise typer.Exit
 
+    if ctx.invoked_subcommand not in COMMANDS_WITHOUT_AUTO_SCAN:
+        _auto_scan()
+
+
+def _auto_scan() -> None:
+    """Bring the catalogue up to date before a command reads it.
+
+    Three guards, because a scan that runs too eagerly is worse than one that runs late:
+
+    A live watcher makes this redundant. If one is running the catalogue is already being
+    kept in step, and scanning again would duplicate its work for nothing.
+
+    A rate limit stops a user running four commands in a row from paying four times.
+
+    And it is skipped entirely when the last scan was cancelled or failed, because
+    silently retrying a scan that just went wrong - with no progress bar, before a command
+    the user actually asked for - is how a tool earns a reputation for hanging.
+
+    The scan itself is incremental, so an unchanged library costs one walk. Failures are
+    swallowed: this is a convenience, and it must never be the reason a command does not
+    run.
+    """
+    settings = get_settings()
+    if not settings.auto_scan:
+        return
+
+    from ai_asset_manager.backend.state import load_state, process_is_alive, save_state
+
+    state = load_state()
+    if process_is_alive(state.watcher_pid):
+        return
+
+    since = state.seconds_since_auto_scan()
+    if since is not None and since < settings.auto_scan_interval_seconds:
+        return
+
+    try:
+        with session_scope() as session:
+            service = ScanService(session)
+            if not service.list_roots(enabled_only=True):
+                return
+
+            started = time.monotonic()
+            run = service.scan(incremental=True)
+            elapsed = time.monotonic() - started
+
+        state.mark_auto_scan()
+        save_state(state)
+
+        if run.assets_created or run.assets_updated or run.assets_missing:
+            console.print(
+                f"[dim]Caught up: {run.assets_created} new, {run.assets_updated} updated, "
+                f"{run.assets_missing} gone ({elapsed:.1f}s)[/dim]"
+            )
+    except Exception:
+        logger.debug("Automatic catch-up scan failed", exc_info=True)
+
 
 def _welcome(database: Path | None) -> None:
     """Greet a bare ``aam`` with the next thing worth doing.
@@ -182,10 +258,7 @@ def _welcome(database: Path | None) -> None:
     they want to know whether this thing has anything to tell them yet, and if not, how to
     make it. So the answer depends on whether a catalogue exists.
     """
-    settings = get_settings()
-    path = database or settings.db_path
-
-    total = _catalogue_size(path)
+    total = _catalogue_size(database or get_settings().db_path)
 
     if total is None:
         _print_first_run()
@@ -252,6 +325,146 @@ def _print_first_run() -> None:
 
 
 # --------------------------------------------------------------------------
+# Discovery
+# --------------------------------------------------------------------------
+
+
+@app.command(rich_help_panel=PANEL_START)
+def discover(
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Add everything found without asking.")
+    ] = False,
+    scan_now: Annotated[
+        bool, typer.Option("--scan/--no-scan", help="Scan the added folders straight away.")
+    ] = True,
+    include_declined: Annotated[
+        bool,
+        typer.Option("--all", help="Also offer locations turned down previously."),
+    ] = False,
+    sweep: Annotated[
+        bool,
+        typer.Option("--sweep/--no-sweep", help="Also look for asset folders on your drives."),
+    ] = True,
+) -> None:
+    """Find where AI assets are stored on this machine and offer to catalogue them.
+
+    Looks in the places thirty-odd tools keep their downloads, honours the environment
+    variables people set when a cache outgrows its drive, and glances a couple of levels
+    below each drive root for folders named like a model library. System directories are
+    never entered.
+
+    Nothing is scanned until you say so.
+    """
+    with session_scope() as session:
+        service = DiscoveryService(session)
+        report = service.discover(include_declined=include_declined, sweep=sweep)
+
+        if not report.total_found:
+            console.print(
+                "[yellow]Found no known AI asset locations on this machine.[/yellow]\n"
+                "[dim]Add a folder directly: aam scan --add D:\\Models[/dim]"
+            )
+            service.complete()
+            return
+
+        if not report.has_candidates:
+            console.print(
+                f"[green]Nothing new.[/green] "
+                f"{len(report.already_managed)} location(s) already catalogued."
+            )
+            if report.previously_declined:
+                console.print(
+                    f"[dim]{len(report.previously_declined)} previously declined; "
+                    "'aam discover --all' to see them again.[/dim]"
+                )
+            service.complete()
+            return
+
+        _print_discovery(report)
+
+        chosen = report.candidates if yes else _ask_which(report.candidates)
+
+        if not chosen:
+            service.decline(report.candidates)
+            service.complete(declined=report.candidates)
+            console.print("\n[dim]Nothing added. Run 'aam discover' again at any time.[/dim]")
+            return
+
+        added = service.accept(chosen)
+        declined = [item for item in report.candidates if item not in chosen]
+        if declined:
+            service.decline(declined)
+        service.complete()
+
+        console.print(f"\n[green]Added {len(added)} location(s).[/green]")
+
+        if scan_now:
+            console.print()
+            _print_scan_summary(_scan_paths(session, added, quiet=False))
+
+
+def _print_discovery(report: Any) -> None:
+    """Show what discovery found, grouped by the kind of thing it holds."""
+    from ai_asset_manager.backend.scanner.locations import group_locations
+
+    console.print("[bold]Found AI assets[/bold]\n")
+
+    for group, items in group_locations(report.candidates).items():
+        console.print(f"[bold cyan]{group}[/bold cyan]")
+        table = Table(box=None, pad_edge=False, show_header=False, padding=(0, 2, 0, 2))
+        table.add_column(style="green", no_wrap=True, width=3)
+        table.add_column(no_wrap=True, max_width=24, overflow="ellipsis")
+        table.add_column(style="dim", overflow="fold")
+        for item in items:
+            # Numbered against the full candidate list, not the group, so that the numbers
+            # a user types under [E]dit mean the same thing wherever they appear.
+            table.add_row(str(report.candidates.index(item) + 1), item.label, str(item.path))
+        console.print(table)
+        console.print()
+
+    if report.already_managed:
+        console.print(
+            f"[dim]{len(report.already_managed)} location(s) already catalogued.[/dim]"
+        )
+
+
+def _ask_which(candidates: list[Any]) -> list[Any]:
+    """Ask whether to add the discovered locations, and which.
+
+    Returns the chosen subset, possibly empty. Defaults to yes because someone who ran
+    discovery wants the result; the escape hatches are for the case where it swept up a
+    folder they would rather leave alone.
+    """
+    answer = typer.prompt(
+        "Add these to your AI library? [Y]es / [N]o / [E]dit", default="Y", show_default=False
+    ).strip().lower()
+
+    if answer.startswith("n"):
+        return []
+    if not answer.startswith("e"):
+        return list(candidates)
+
+    console.print("[dim]Enter the numbers to add, separated by spaces or commas.[/dim]")
+    selection = typer.prompt("Which", default="").strip()
+    if not selection:
+        return []
+
+    chosen: list[Any] = []
+    for token in selection.replace(",", " ").split():
+        try:
+            index = int(token) - 1
+        except ValueError:
+            error_console.print(f"Ignoring {token!r}: not a number.")
+            continue
+        if 0 <= index < len(candidates):
+            chosen.append(candidates[index])
+        else:
+            error_console.print(f"Ignoring {token}: out of range.")
+
+    return chosen
+
+
+# --------------------------------------------------------------------------
 # Scanning
 # --------------------------------------------------------------------------
 
@@ -269,6 +482,10 @@ def scan(
     full: Annotated[
         bool, typer.Option("--full", help="Re-parse every asset, ignoring fingerprints.")
     ] = False,
+    incremental: Annotated[
+        bool,
+        typer.Option("--incremental", help="Only process what changed. This is the default."),
+    ] = False,
     add: Annotated[
         bool, typer.Option("--add", help="Also register these paths as permanent scan roots.")
     ] = False,
@@ -278,14 +495,22 @@ def scan(
 ) -> None:
     r"""Scan folders and update the catalogue.
 
-    Rescans are incremental: assets whose files are unchanged are skipped entirely.
+    Rescans are incremental by default: an asset whose files are unchanged is skipped
+    without being re-parsed, so a second scan of an unchanged library costs one walk.
+    ``--incremental`` is accepted for symmetry and changes nothing; ``--full`` is the flag
+    that does, and it re-parses everything.
 
     [bold]Examples[/bold]
 
       [cyan]aam scan --auto[/cyan]              every cache this tool can find
       [cyan]aam scan D:\\Models --add[/cyan]     a folder, remembered for next time
       [cyan]aam scan[/cyan]                     everything remembered
+      [cyan]aam scan --full[/cyan]              re-parse everything from scratch
     """
+    if full and incremental:
+        error_console.print("--full and --incremental ask for opposite things.")
+        raise typer.Exit(code=2)
+
     targets = [str(path) for path in paths] if paths else None
 
     if auto:
@@ -316,19 +541,27 @@ def scan(
         if not targets and not service.list_roots(enabled_only=True):
             error_console.print(
                 "No scan roots configured.\n"
-                "Try 'aam scan --auto' to catalogue the caches on this machine, pass a "
-                "folder directly, or add one with 'aam roots add <path>'."
+                "Try 'aam discover' to find them automatically, 'aam scan --auto' to "
+                "catalogue the known caches, or pass a folder directly."
             )
             raise typer.Exit(code=1)
 
-        cancel_event = threading.Event()
-        if quiet:
-            context = ScanContext(cancel_event=cancel_event)
-            run = service.scan(targets, context=context, incremental=not full)
-        else:
-            run = _scan_with_progress(service, targets, cancel_event, incremental=not full)
+        run = _scan_paths(session, targets, quiet=quiet, full=full)
 
     _print_scan_summary(run)
+
+
+def _scan_paths(
+    session: Any, targets: list[str] | None, *, quiet: bool, full: bool = False
+) -> ScanRun:
+    """Run a scan and render it, so that `scan` and `discover` behave identically."""
+    service = ScanService(session)
+    cancel_event = threading.Event()
+
+    if quiet:
+        context = ScanContext(cancel_event=cancel_event)
+        return service.scan(targets, context=context, incremental=not full)
+    return _scan_with_progress(service, targets, cancel_event, incremental=not full)
 
 
 def _scan_with_progress(
@@ -1051,10 +1284,17 @@ def guide() -> None:
     """Show worked examples of the things people actually want to do."""
     recipes: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("Getting started", (
+            ("aam discover", "find where AI assets live, and offer to catalogue them"),
             ("aam scan --auto", "catalogue every cache found on this machine"),
             ("aam scan D:\\Models E:\\Datasets", "catalogue specific folders"),
             ("aam scan --add D:\\Models", "remember the folder for next time"),
             ("aam scan", "rescan everything remembered (skips unchanged)"),
+        )),
+        ("Staying up to date", (
+            ("aam status", "what is managed, when it was scanned, is a watcher live"),
+            ("aam watch", "keep the catalogue in step as files change"),
+            ("aam watch --status", "is a watcher running, and over what"),
+            ("aam watch --stop", "stop one running in another terminal"),
         )),
         ("What do I have?", (
             ("aam inventory", "everything, by category"),
@@ -1096,6 +1336,201 @@ def guide() -> None:
         "\n[dim]Everything above is read-only. This tool never moves, renames or "
         "deletes a file.[/dim]"
     )
+
+
+# --------------------------------------------------------------------------
+# Live indexing
+# --------------------------------------------------------------------------
+
+
+@app.command(rich_help_panel=PANEL_LIBRARY)
+def status() -> None:
+    """Show what is managed, when it was last scanned, and whether a watcher is live."""
+    from ai_asset_manager.backend.state import load_state, process_is_alive
+    from ai_asset_manager.backend.taxonomy import default_registry
+
+    state = load_state()
+
+    with session_scope() as session:
+        roots = ScanService(session).list_roots()
+        assets = AssetService(session)
+        latest = session.scalars(
+            select(ScanRun).order_by(ScanRun.started_at.desc()).limit(1)
+        ).first()
+
+        table = Table(box=None, pad_edge=False, show_header=False)
+        table.add_column(style="dim", width=18)
+        table.add_column()
+
+        total_assets = sum(assets.counts_by_kind().values())
+        table.add_row(
+            "Assets", f"{total_assets:,} ({format_bytes(assets.total_size())})"
+        )
+        table.add_row("Files", f"{assets.file_count():,}")
+
+        if latest is not None:
+            when = format_relative_time(latest.started_at)
+            duration = format_duration(latest.duration_seconds or 0.0)
+            table.add_row("Last scan", f"{when} · {latest.status} · {duration}")
+        else:
+            table.add_row("Last scan", "[yellow]never[/yellow]")
+
+        watcher_alive = process_is_alive(state.watcher_pid)
+        if watcher_alive:
+            age = state.watcher_age_seconds or 0.0
+            table.add_row(
+                "Watcher",
+                f"[green]running[/green] · pid {state.watcher_pid} · "
+                f"up {format_duration(age)} · {len(state.watcher_roots)} root(s)",
+            )
+        else:
+            table.add_row("Watcher", "[dim]not running[/dim]  [dim](aam watch)[/dim]")
+
+        registry = default_registry()
+        table.add_row(
+            "Taxonomy",
+            f"{len(registry.categories())} categories from {len(registry.plugins())} plugins",
+        )
+        table.add_row("Database", f"{_database_size()} · {_active_database()}")
+        table.add_row(
+            "Discovery",
+            "done" if state.discovery_completed else "[yellow]not yet run[/yellow]",
+        )
+
+        console.print(Panel(table, title="AI Asset Manager", border_style="cyan", expand=False))
+
+        if not roots:
+            console.print(
+                "\n[yellow]No managed folders.[/yellow] "
+                "[dim]Run 'aam discover' to find them.[/dim]"
+            )
+            return
+
+        console.print("\n[bold]Managed folders[/bold]")
+        root_table = Table(box=None, pad_edge=False, header_style="bold")
+        root_table.add_column("Folder", style="cyan", max_width=52, overflow="ellipsis")
+        root_table.add_column("Assets", justify="right")
+        root_table.add_column("Last scanned", style="dim")
+        root_table.add_column("", style="dim")
+
+        for root in roots:
+            root_table.add_row(
+                root.path,
+                f"{root.last_asset_count:,}",
+                format_relative_time(root.last_scanned) if root.last_scanned else "never",
+                "" if root.enabled else "disabled",
+            )
+        console.print(root_table)
+
+
+def _active_database() -> Path:
+    """Return the catalogue file in use, honouring --database."""
+    return _database_override or get_settings().db_path
+
+
+def _database_size() -> str:
+    """Return the catalogue's size on disk, counting its write-ahead log."""
+    path = _active_database()
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        candidate = Path(f"{path}{suffix}")
+        try:
+            total += candidate.stat().st_size
+        except OSError:
+            continue
+    return format_bytes(total) if total else "empty"
+
+
+@app.command(rich_help_panel=PANEL_LIBRARY)
+def watch(
+    paths: Annotated[
+        list[Path] | None,
+        typer.Argument(help="Folders to watch. Defaults to the managed roots."),
+    ] = None,
+    stop: Annotated[
+        bool, typer.Option("--stop", help="Ask a running watcher to shut down.")
+    ] = False,
+    show_status: Annotated[
+        bool, typer.Option("--status", help="Report whether a watcher is running.")
+    ] = False,
+    initial_scan: Annotated[
+        bool,
+        typer.Option("--scan/--no-scan", help="Scan once before watching starts."),
+    ] = True,
+) -> None:
+    """Keep the catalogue in step with the disk as files change.
+
+    Filesystem events are collected and debounced, so copying a thousand files produces
+    one update rather than a thousand. Each update rescans only the subtree that changed.
+
+    Runs in the foreground until Ctrl-C. From another terminal, 'aam watch --stop'.
+    """
+    from ai_asset_manager.backend.state import load_state, process_is_alive
+    from ai_asset_manager.backend.watch import WatchService, request_watcher_stop
+
+    if stop:
+        if request_watcher_stop():
+            console.print("[green]Asked the watcher to stop.[/green]")
+        else:
+            console.print("[dim]No watcher is running.[/dim]")
+        return
+
+    if show_status:
+        state = load_state()
+        if process_is_alive(state.watcher_pid):
+            console.print(
+                f"[green]Running[/green] · pid {state.watcher_pid} · "
+                f"up {format_duration(state.watcher_age_seconds or 0.0)}"
+            )
+            for root in state.watcher_roots:
+                console.print(f"  [cyan]{root}[/cyan]")
+        else:
+            console.print("[dim]Not running.[/dim]")
+        return
+
+    state = load_state()
+    if process_is_alive(state.watcher_pid):
+        error_console.print(
+            f"A watcher is already running (pid {state.watcher_pid}).\n"
+            "Stop it with 'aam watch --stop' first."
+        )
+        raise typer.Exit(code=1)
+
+    targets = [str(path) for path in paths] if paths else None
+
+    if initial_scan:
+        with session_scope() as session:
+            if not targets and not ScanService(session).list_roots(enabled_only=True):
+                error_console.print(
+                    "No folders to watch. Run 'aam discover', or pass one directly."
+                )
+                raise typer.Exit(code=1)
+            console.print("[dim]Catching up before watching...[/dim]")
+            _print_scan_summary(_scan_paths(session, targets, quiet=True))
+            console.print()
+
+    service = WatchService(session_scope)
+
+    def on_ready(roots: list[str]) -> None:
+        """Report what is being watched."""
+        console.print(f"[green]Watching[/green] {len(roots)} folder(s):")
+        for root in roots:
+            console.print(f"  [cyan]{root}[/cyan]")
+        console.print("\n[dim]Ctrl-C to stop, or 'aam watch --stop' from elsewhere.[/dim]")
+
+    def on_result(result: Any) -> None:
+        """Print each batch that actually changed something."""
+        if result.changed:
+            stamp = datetime.now().strftime("%H:%M:%S")
+            console.print(f"[dim]{stamp}[/dim] {result.describe()}")
+
+    try:
+        service.run(targets, on_ready=on_ready, on_result=on_result)
+    except RuntimeError as exc:
+        error_console.print(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    console.print("[dim]Watcher stopped.[/dim]")
 
 
 def main() -> None:
