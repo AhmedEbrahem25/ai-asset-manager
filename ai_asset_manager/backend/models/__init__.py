@@ -26,6 +26,7 @@ from ai_asset_manager.backend.models.enums import (
     Severity,
 )
 from ai_asset_manager.backend.models.health import HealthFinding
+from ai_asset_manager.backend.models.link import AssetLink, LinkRelation
 from ai_asset_manager.backend.models.scan import ScanRoot, ScanRun
 from ai_asset_manager.backend.models.tag import BUILTIN_TAGS, Tag, asset_tags
 
@@ -35,6 +36,7 @@ __all__ = [
     "AssetFile",
     "AssetFormat",
     "AssetKind",
+    "AssetLink",
     "Base",
     "DatasetDetails",
     "DatasetFormat",
@@ -45,6 +47,7 @@ __all__ = [
     "Framework",
     "HealthFinding",
     "HealthStatus",
+    "LinkRelation",
     "Modality",
     "ModelDetails",
     "ModelType",

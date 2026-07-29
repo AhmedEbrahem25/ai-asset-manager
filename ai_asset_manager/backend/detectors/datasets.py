@@ -23,6 +23,10 @@ from ai_asset_manager.backend.detectors.base import (
     BaseDetector,
     DetectionResult,
 )
+from ai_asset_manager.backend.detectors.boundary import (
+    MIN_UNSTRUCTURED_IMAGES,
+    looks_like_dataset_root,
+)
 from ai_asset_manager.backend.models.enums import AssetKind, DatasetFormat, Modality
 from ai_asset_manager.backend.scanner.context import DirectoryContext
 from ai_asset_manager.logging_conf import get_logger
@@ -70,6 +74,41 @@ def load_json_head(path: str, *, max_bytes: int = 4 * 1024 * 1024) -> dict[str, 
     except (OSError, json.JSONDecodeError, ValueError):
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _direct_class_counts(ctx: DirectoryContext) -> dict[str, int]:
+    """Return a histogram of content classes for files directly in this directory."""
+    counts: dict[str, int] = {}
+    for entry in ctx.files:
+        klass = entry.content_class
+        if klass:
+            counts[klass] = counts.get(klass, 0) + 1
+    return counts
+
+
+def _direct_extension_count(ctx: DirectoryContext, *extensions: str) -> int:
+    """Return how many files directly in this directory carry any of these extensions."""
+    wanted = {ext.lower() for ext in extensions}
+    return sum(1 for entry in ctx.files if entry.extension in wanted)
+
+
+#: Directories that hold supervision for the media beside them.
+_LABEL_DIRS = ("labels", "annotations", "masks", "gt", "ground_truth", "captions",
+               "transcripts", "metadata")
+
+
+def _assembled(ctx: DirectoryContext) -> bool:
+    """Report whether a pile of media shows signs of having been assembled deliberately.
+
+    Three things count, and each is an act by whoever built the dataset rather than a
+    by-product of downloading files into a folder: a split layout, a manifest naming the
+    contents, or a directory of labels sitting beside the media.
+    """
+    if looks_like_dataset_root(ctx):
+        return True
+    if ctx.has_any_dir(*_LABEL_DIRS):
+        return True
+    return bool(ctx.glob("*.csv") or ctx.glob("*.jsonl") or ctx.glob("*.parquet"))
 
 
 def find_split_dirs(ctx: DirectoryContext) -> list[str]:
@@ -258,11 +297,17 @@ class NuScenesDetector(BaseDetector):
     TABLE_FILES = ("sample.json", "scene.json", "sample_data.json", "ego_pose.json")
 
     def detect(self, ctx: DirectoryContext) -> list[DetectionResult]:
-        """Emit one dataset when a ``v1.0-*`` metadata directory is present."""
+        """Emit one dataset when a ``v1.0-*`` metadata directory is present.
+
+        ``samples/`` alone is not evidence. Plenty of directories keep a folder of samples,
+        and on the development machine a folder of security logs with one ``samples/``
+        child was confidently filed as an autonomous-driving dataset. nuScenes ships
+        ``samples`` *and* ``sweeps`` together, so requiring the pair costs nothing real.
+        """
         version_dirs = [
             name for name in ctx.child_dir_names if name.lower().startswith("v1.0")
         ]
-        has_sensor_dirs = ctx.has_any_dir("samples", "sweeps")
+        has_sensor_dirs = ctx.has_dir("samples", "sweeps")
 
         if not version_dirs and not has_sensor_dirs:
             return []
@@ -301,8 +346,18 @@ class MotDetector(BaseDetector):
     priority = PRIORITY_DATASET_SPECIFIC
 
     def detect(self, ctx: DirectoryContext) -> list[DetectionResult]:
-        """Emit one dataset when MOT sequence descriptors are present."""
-        sequences = ctx.glob_subtree("seqinfo.ini", limit=64)
+        """Emit one dataset when MOT sequence descriptors sit close beneath this directory.
+
+        A subtree-wide search would let any ancestor claim the dataset — and since the
+        first match up the tree wins, that ancestor would be whichever container the
+        sequences happen to live in. MOT's own layout puts ``seqinfo.ini`` exactly one
+        level below the dataset root (``MOT17/train/MOT17-02-DPM/seqinfo.ini`` relative to
+        ``MOT17/train``), so looking one level down finds the boundary rather than an
+        arbitrary ancestor of it.
+        """
+        sequences = [
+            child.name for child in ctx.children() if child.has("seqinfo.ini")
+        ]
         if not sequences:
             return []
 
@@ -381,6 +436,96 @@ class HfDatasetCacheDetector(BaseDetector):
         ]
 
 
+class IdxUbyteDetector(BaseDetector):
+    """Detects an MNIST-family dataset stored in IDX binary format.
+
+    MNIST, Fashion-MNIST, KMNIST and EMNIST all ship as four ``*-idx?-ubyte`` files and
+    nothing else — no images on disk, no annotations, no manifest. Every heuristic in this
+    module keys on structure that simply is not there, so torchvision's most-downloaded
+    dataset was invisible until this existed.
+    """
+
+    name = "idx_ubyte"
+    priority = PRIORITY_DATASET_SPECIFIC
+
+    def detect(self, ctx: DirectoryContext) -> list[DetectionResult]:
+        """Emit one dataset for a directory of IDX files."""
+        idx_files = [
+            entry.name
+            for entry in ctx.files
+            if "-idx" in entry.name.lower() and "ubyte" in entry.name.lower()
+        ]
+        if len(idx_files) < 2:
+            return []
+
+        # torchvision unpacks into `<name>/raw`; the dataset's identity is the parent.
+        name = ctx.name
+        if name.lower() in {"raw", "processed"} and ctx.parent_name:
+            name = ctx.parent_name
+
+        return [
+            self._result(
+                ctx,
+                kind=AssetKind.DATASET,
+                name=name,
+                subkind=DatasetFormat.IMAGE_CLASSIFICATION.value,
+                confidence=0.9,
+                evidence={
+                    "idx_files": sorted(idx_files)[:12],
+                    "compressed": ctx.count_extension(".gz"),
+                    "modalities": [Modality.RGB.value],
+                },
+            )
+        ]
+
+
+class TabularDatasetDetector(BaseDetector):
+    """Detects a corpus of tabular or record files.
+
+    Requires the records to be what the directory *is*, measured over its own files rather
+    than its subtree, and requires them to be substantial: two stray CSVs beside a hundred
+    scripts is a project that reads data, not a dataset.
+    """
+
+    name = "tabular_dataset"
+    priority = PRIORITY_DATASET_GENERIC
+
+    #: Extensions that hold records rather than prose.
+    RECORD_EXTENSIONS = (".csv", ".tsv", ".parquet", ".arrow", ".feather", ".jsonl")
+
+    MIN_FILES = 2
+    #: A real corpus is measured in megabytes. This filters out the sample files that
+    #: accompany code without excluding a genuinely small labelled set.
+    MIN_BYTES = 512 * 1024
+
+    def detect(self, ctx: DirectoryContext) -> list[DetectionResult]:
+        """Emit one dataset for a directory of record files."""
+        records = [
+            entry for entry in ctx.files if entry.extension in self.RECORD_EXTENSIONS
+        ]
+        if len(records) < self.MIN_FILES:
+            return []
+        total = sum(entry.size for entry in records)
+        if total < self.MIN_BYTES:
+            return []
+        if len(records) / max(1, len(ctx.files)) < 0.5:
+            return []
+
+        return [
+            self._result(
+                ctx,
+                kind=AssetKind.DATASET,
+                subkind=DatasetFormat.TABULAR.value,
+                confidence=0.6,
+                evidence={
+                    "records": len(records),
+                    "bytes": total,
+                    "modalities": [Modality.TEXT.value],
+                },
+            )
+        ]
+
+
 class ImageClassificationDetector(BaseDetector):
     """Detects a directory-per-class image dataset.
 
@@ -394,6 +539,17 @@ class ImageClassificationDetector(BaseDetector):
 
     #: A dataset needs several classes; two directories of pictures is not a taxonomy.
     MIN_CLASS_DIRS = 3
+
+    #: ...unless the classes sit under named splits. ``train/{ants,bees}`` beside
+    #: ``val/{ants,bees}`` is unambiguously an ImageFolder dataset — nobody arranges
+    #: holiday photos that way — so two classes suffice once splits are present. Without
+    #: this, the canonical two-class PyTorch tutorial set is claimed as four separate
+    #: datasets, one per class folder, at the wrong boundary.
+    MIN_CLASS_DIRS_WITH_SPLITS = 2
+
+    #: Average images per class below which this is a folder-per-thing layout rather than
+    #: a labelled dataset.
+    MIN_IMAGES_PER_CLASS = 10
 
     #: WordNet ids (``n01440764``), which mark a directory as ImageNet specifically.
     WNID_RE = re.compile(r"^n\d{8}$")
@@ -416,13 +572,28 @@ class ImageClassificationDetector(BaseDetector):
         # swallowing every real dataset beneath it. A parent of datasets has children
         # with their own structure; a class folder is a leaf.
         class_dirs: list[str] = []
+        class_images = 0
         for root in search_roots:
             for candidate in root.children():
                 if candidate.direct_image_count > 0 and candidate.is_leaf:
                     class_dirs.append(candidate.name)
+                    class_images += candidate.direct_image_count
 
         unique_classes = sorted(set(class_dirs))
-        if len(unique_classes) < self.MIN_CLASS_DIRS:
+        minimum = self.MIN_CLASS_DIRS_WITH_SPLITS if split_dirs else self.MIN_CLASS_DIRS
+        if len(unique_classes) < minimum:
+            return []
+
+        # A class with one example in it is not a class. Any folder-per-thing layout looks
+        # like this one — 110 Office add-in directories each holding a single icon, a
+        # notes vault whose chapters each hold a screenshot — and only the density of
+        # examples separates those from a training set.
+        #
+        # Counted over the class folders themselves rather than the subtree: a directory
+        # can hold thousands of images that are not in any class folder, and dividing
+        # those by the class count would let the layout pass on the strength of images
+        # that have nothing to do with it.
+        if class_images / len(class_dirs) < self.MIN_IMAGES_PER_CLASS:
             return []
 
         is_imagenet = sum(
@@ -450,11 +621,20 @@ class ImageClassificationDetector(BaseDetector):
 
 
 class MediaCollectionDetector(BaseDetector):
-    """Detects bulk video, audio or text corpora with no more specific structure.
+    r"""Detects bulk video, audio or text corpora with no more specific structure.
 
-    Last resort before a directory is left uncatalogued. Deliberately conservative: it
-    requires a large, homogeneous body of media so that ordinary media folders — a music
-    library, a directory of holiday photos — are not filed as training data.
+    Last resort before a directory is left uncatalogued, and historically the source of the
+    worst misclassifications this project has produced. Two rules keep it honest.
+
+    *Counts are of files sitting directly here, never of the subtree.* A subtree count
+    describes everything below a directory, which at ``F:\`` means the whole disk; since
+    detection runs parents first and a claim suppresses its descendants, the rule fired at
+    the top of the tree and swallowed everything real underneath. On the development
+    machine two ``.jsonl`` files five levels down were enough to file an entire 372-
+    directory project as one NLP dataset.
+
+    *The media must be what the directory is.* A folder is a corpus when its contents are
+    overwhelmingly one kind of thing, not when it merely contains ten of them somewhere.
     """
 
     name = "media_collection"
@@ -464,32 +644,54 @@ class MediaCollectionDetector(BaseDetector):
     MIN_AUDIO = 50
     MIN_TEXT_RECORDS = 2
 
-    def detect(self, ctx: DirectoryContext) -> list[DetectionResult]:
-        """Emit one dataset for a sufficiently large single-modality collection."""
-        videos = ctx.video_count
-        audio = ctx.audio_count
-        images = ctx.image_count
-        jsonl = ctx.count_extension(".jsonl")
-        parquet = ctx.count_extension(".parquet")
+    #: Share of this directory's own files that must belong to the claimed modality. A
+    #: project folder with a dozen sample clips beside its source code fails this; a
+    #: directory of nothing but clips passes.
+    DOMINANCE = 0.6
 
-        if videos >= self.MIN_VIDEOS and videos > images:
+    def detect(self, ctx: DirectoryContext) -> list[DetectionResult]:
+        """Emit one dataset for a sufficiently large single-modality collection.
+
+        Bulk alone is never enough. A folder of a thousand images and a folder of a
+        thousand screenshots are the same shape, and so are a video dataset and a course
+        download — on the development machine this rule claimed a Udemy course, three
+        screen-recording folders and 1,070 screenshots, all of them correctly described as
+        "lots of media" and none of them a dataset. Something must say that the media was
+        *assembled* rather than merely accumulated: a split layout, a manifest, or labels
+        beside it. That is the "strong structural evidence" a dataset has and a folder
+        does not.
+        """
+        if not _assembled(ctx):
+            return []
+
+        direct = _direct_class_counts(ctx)
+        total = len(ctx.files)
+        videos = direct.get("video", 0)
+        audio = direct.get("audio", 0)
+        images = direct.get("image", 0)
+        jsonl = _direct_extension_count(ctx, ".jsonl")
+        parquet = _direct_extension_count(ctx, ".parquet")
+
+        def dominant(count: int) -> bool:
+            return total > 0 and count / total >= self.DOMINANCE
+
+        if videos >= self.MIN_VIDEOS and dominant(videos):
             return [self._emit(ctx, DatasetFormat.VIDEO, Modality.VIDEO, {"videos": videos})]
 
-        if audio >= self.MIN_AUDIO and audio > images:
+        if audio >= self.MIN_AUDIO and dominant(audio):
             return [self._emit(ctx, DatasetFormat.AUDIO, Modality.AUDIO, {"audio": audio})]
 
-        if jsonl + parquet >= self.MIN_TEXT_RECORDS and images < MIN_DATASET_IMAGES:
+        if jsonl + parquet >= self.MIN_TEXT_RECORDS and dominant(jsonl + parquet):
             return [
                 self._emit(
                     ctx, DatasetFormat.NLP, Modality.TEXT, {"jsonl": jsonl, "parquet": parquet}
                 )
             ]
 
-        if images >= MIN_DATASET_IMAGES and not ctx.child_dir_names:
-            # A flat pile of images with no labels anywhere: real, but unstructured.
+        if images >= MIN_UNSTRUCTURED_IMAGES and dominant(images):
             return [
                 self._emit(
-                    ctx, DatasetFormat.CUSTOM, Modality.RGB, {"images": images}, confidence=0.4
+                    ctx, DatasetFormat.CUSTOM, Modality.RGB, {"images": images}, confidence=0.5
                 )
             ]
 

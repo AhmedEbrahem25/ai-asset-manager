@@ -12,10 +12,17 @@ whether to look there.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from ai_asset_manager.backend.scanner.locations import KnownLocation, discover
+from ai_asset_manager.backend.scanner.locations import (
+    DEEP_BUDGET_SECONDS,
+    DEEP_MAX_DEPTH,
+    KnownLocation,
+    deep_sweep,
+    discover,
+)
 from ai_asset_manager.backend.services.scan_service import ScanService
 from ai_asset_manager.backend.state import AppState, load_state, save_state
 from ai_asset_manager.backend.utils.paths import normalize_path
@@ -57,7 +64,14 @@ class DiscoveryService:
         self.scans = ScanService(session)
 
     def discover(
-        self, *, include_declined: bool = False, sweep: bool = True
+        self,
+        *,
+        include_declined: bool = False,
+        sweep: bool = True,
+        deep: bool = False,
+        budget_seconds: float = DEEP_BUDGET_SECONDS,
+        max_depth: int = DEEP_MAX_DEPTH,
+        roots: list[Path] | None = None,
     ) -> DiscoveryReport:
         """Return the locations on this machine, sorted into what to do with them.
 
@@ -66,6 +80,11 @@ class DiscoveryService:
                 ``aam discover`` passes when run explicitly, since asking again is the
                 whole reason someone would run it a second time.
             sweep: Also look for likely folders near each drive root.
+            deep: Also search drives by content rather than by folder name. Finds
+                libraries nested inside projects, which the name-based sweep cannot see.
+            budget_seconds: Wall-clock ceiling for the deep search.
+            max_depth: How far below each root the deep search may descend.
+            roots: Restrict the deep search to these directories.
         """
         state = load_state()
         declined = {normalize_path(path) for path in state.declined_paths}
@@ -73,7 +92,19 @@ class DiscoveryService:
 
         report = DiscoveryReport()
 
-        for location in discover(sweep=sweep):
+        locations = discover(sweep=sweep)
+        if deep:
+            known = {location.path for location in locations}
+            locations.extend(
+                found
+                for found in deep_sweep(
+                    roots, budget_seconds=budget_seconds, max_depth=max_depth
+                )
+                if found.path not in known
+            )
+            locations = _drop_nested(locations)
+
+        for location in locations:
             path = normalize_path(str(location.path))
 
             if _is_managed(path, managed):
@@ -122,6 +153,27 @@ class DiscoveryService:
     def should_run_on_startup() -> bool:
         """Report whether this is a first run that should offer discovery."""
         return not load_state().discovery_completed
+
+
+def _drop_nested(locations: list[KnownLocation]) -> list[KnownLocation]:
+    r"""Remove locations that sit inside another location already being offered.
+
+    The deep search and the known-tool list frequently reach the same library by different
+    routes: one knows that Ollama lives at ``~\.ollama``, the other finds the store at
+    ``~\.ollama\models`` by recognising its blob layout. Offering both asks the user to
+    approve the same files twice and, if they approve both, scans them twice. The outer
+    one wins, because the scanner recurses.
+    """
+    outer: list[str] = []
+    survivors: set[int] = set()
+    # Shortest first, so a parent is always considered before anything beneath it.
+    for location in sorted(locations, key=lambda item: len(str(item.path))):
+        if not _is_managed(str(location.path), outer):
+            outer.append(str(location.path))
+            survivors.add(id(location))
+    # Returned in the caller's order: the display groups tool locations before swept ones,
+    # and reordering here would shuffle the numbers the user types.
+    return [location for location in locations if id(location) in survivors]
 
 
 def _is_managed(path: str, roots: list[str]) -> bool:

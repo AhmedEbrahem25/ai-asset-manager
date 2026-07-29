@@ -162,6 +162,8 @@ class ScanService:
             if prune_missing:
                 run.assets_missing = self._mark_missing(targets, seen_paths)
 
+            self._rebuild_links()
+
             run.status = ScanStatus.COMPLETED
 
         except ScanCancelled:
@@ -190,6 +192,24 @@ class ScanService:
             run.assets_created, run.assets_updated, run.assets_unchanged, run.assets_missing,
         )
         return run
+
+    def _rebuild_links(self) -> None:
+        """Recompute the relationship graph over the whole catalogue.
+
+        Whole catalogue rather than the scanned roots: an edge crosses roots whenever a
+        project on one drive holds a model cached on another, and a partial rebuild would
+        drop exactly those. The cost is two queries over rows already in memory.
+
+        A failure here must not fail the scan. The graph is derived data — the next scan
+        rebuilds it — while the assets it was derived from are the thing worth keeping.
+        """
+        from ai_asset_manager.backend.services.linking_service import LinkingService
+
+        try:
+            LinkingService(self.session).rebuild()
+        except Exception:
+            logger.exception("Could not rebuild the relationship graph")
+            self.session.rollback()
 
     # -- persistence --------------------------------------------------------
 

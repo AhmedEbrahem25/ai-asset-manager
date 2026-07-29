@@ -405,6 +405,53 @@ class MlxDetector(BaseDetector):
         ]
 
 
+class PaddleInferenceDetector(BaseDetector):
+    """Detects a PaddlePaddle inference bundle.
+
+    Paddle splits one model across ``inference.pdmodel`` (the graph) and
+    ``inference.pdiparams`` (the weights), with the *directory* name carrying the identity:
+    ``arabic_PP-OCRv4_rec_infer`` says language, version and stage. Without this, the pair
+    is invisible — neither file is a self-contained model, so the loose-weights rule
+    correctly declines them and nothing else looks.
+    """
+
+    name = "paddle_inference"
+    priority = PRIORITY_FRAMEWORK
+
+    def detect(self, ctx: DirectoryContext) -> list[DetectionResult]:
+        """Emit one model for a Paddle inference directory."""
+        if not (ctx.has_any("inference.pdmodel", "model.pdmodel", "inference.json")):
+            return []
+        if not ctx.has_any("inference.pdiparams", "model.pdiparams"):
+            return []
+
+        lowered = ctx.name.lower()
+        if "_rec" in lowered or "rec_" in lowered:
+            model_type = ModelType.OCR
+        elif "_det" in lowered or "det_" in lowered:
+            model_type = ModelType.OBJECT_DETECTION
+        elif "_cls" in lowered or "cls_" in lowered:
+            model_type = ModelType.CLASSIFICATION
+        else:
+            model_type = ModelType.UNKNOWN
+
+        return [
+            self._result(
+                ctx,
+                kind=AssetKind.MODEL,
+                subkind=model_type.value if model_type is not ModelType.UNKNOWN else None,
+                format=AssetFormat.PADDLE,
+                framework=Framework.PADDLE,
+                confidence=0.9,
+                evidence={
+                    "graph": True,
+                    "params": True,
+                    "stage": model_type.value,
+                },
+            )
+        ]
+
+
 class LooseWeightsDetector(BaseDetector):
     r"""Detects standalone weight files with no surrounding repository structure.
 
@@ -417,9 +464,20 @@ class LooseWeightsDetector(BaseDetector):
     priority = PRIORITY_LOOSE_WEIGHTS
 
     #: Extensions treated as self-contained models when found on their own.
+    #: ``.mlmodel`` covers both CoreML and Kraken's OCR models, ``.npz`` the JAX/Flax and
+    #: scikit-learn corner, ``.pdparams`` a Paddle model saved outside an inference bundle.
     STANDALONE_EXTENSIONS = (
         "*.gguf", "*.ggml", "*.onnx", "*.engine", "*.plan",
         "*.pt", "*.pth", "*.ckpt", "*.safetensors", "*.keras", "*.h5", "*.tflite",
+        "*.mlmodel", "*.npz", "*.pdparams", "*.msgpack",
+    )
+
+    #: Filename fragments marking a weight file as a point in a training run rather than a
+    #: finished model. Cataloguing ``dapt_epoch3.pt`` as a model alongside its four
+    #: siblings implies five models exist where there is really one run; calling them
+    #: checkpoints says what they are and lets the relationship graph attach them to it.
+    CHECKPOINT_MARKERS = (
+        "epoch", "step", "iter", "checkpoint", "ckpt", "last", "best", "latest",
     )
 
     #: Files below this size are companions — tokenisers, projections, configs — rather
@@ -445,7 +503,11 @@ class LooseWeightsDetector(BaseDetector):
 
             results.append(
                 DetectionResult(
-                    kind=AssetKind.MODEL,
+                    kind=(
+                        AssetKind.CHECKPOINT
+                        if self._is_checkpoint(group_name)
+                        else AssetKind.MODEL
+                    ),
                     name=group_name,
                     root_path=primary.path,
                     detector=self.name,
@@ -464,6 +526,11 @@ class LooseWeightsDetector(BaseDetector):
                 )
             )
         return results
+
+    def _is_checkpoint(self, name: str) -> bool:
+        """Report whether a weight file's name marks it as a training checkpoint."""
+        lowered = name.lower()
+        return any(marker in lowered for marker in self.CHECKPOINT_MARKERS)
 
     def _group_shards(self, entries: list[FileEntry]) -> dict[str, list[FileEntry]]:
         """Group multi-part shards under one name.

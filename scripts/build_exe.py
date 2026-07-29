@@ -192,6 +192,31 @@ def _verify_taxonomy(executable: Path) -> None:
         )
 
     print(f"  ok  taxonomy loaded ({len(expected)} plugins)")
+    _verify_detectors(output)
+
+
+def _verify_detectors(version_output: str) -> None:
+    """Assert the frozen binary kept its detectors.
+
+    A build that classifies perfectly but detects nothing scans a full drive, reports zero
+    assets, and looks exactly like an empty disk. The count is compared against the source
+    tree's own registry so that adding a detector cannot silently weaken this check.
+    """
+    from ai_asset_manager.backend.detectors.registry import default_detectors
+
+    expected = len(default_detectors())
+    for line in version_output.splitlines():
+        if line.strip().startswith("Detectors:"):
+            reported = int(line.split(":", 1)[1].strip())
+            if reported != expected:
+                raise SystemExit(
+                    f"The frozen binary registered {reported} detector(s); "
+                    f"the source tree has {expected}."
+                )
+            print(f"  ok  detectors loaded ({reported})")
+            return
+
+    raise SystemExit(f"'version --plugins' reported no detector count.\n{version_output}")
 
 
 def _run(executable: Path, arguments: list[str]) -> str:

@@ -23,9 +23,17 @@ Reusable beyond the CLI: the dashboard's "add a folder" screen wants the same li
 
 from __future__ import annotations
 
+import heapq
+import itertools
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from ai_asset_manager.backend.scanner.scoring import score_directory
+from ai_asset_manager.logging_conf import get_logger
+
+logger = get_logger(__name__)
 
 #: Cap on how many locations a sweep will offer. A machine with a hundred candidate
 #: folders has a naming problem the user should resolve, not a discovery problem.
@@ -35,6 +43,25 @@ MAX_DISCOVERED = 60
 #: two finds ``D:\AI\Models``, which is where people actually put things. Three would
 #: start costing real time on a full disk for almost no extra yield.
 SWEEP_DEPTH = 2
+
+#: Wall-clock ceiling for ``--deep``, per invocation. Chosen so the command stays something
+#: a person waits for rather than schedules: on the development machine a full pass over
+#: both drives finishes well inside it, and on a slower disk a partial answer is still a
+#: useful one.
+DEEP_BUDGET_SECONDS = 60.0
+
+#: How far below a root the deep search may descend. Eight levels comfortably reaches
+#: ``F:\project\NLP-Project\thorn-nlp\data\hf_cache\hub``, the deepest real library on this
+#: machine and a fair benchmark for how far people actually nest.
+DEEP_MAX_DEPTH = 8
+
+#: Levels below a root that are explored without needing to look interesting. The top of a
+#: drive is all container names, and a library's parent directory never scores.
+DEEP_FREE_DEPTH = 2
+
+#: A directory with no more than this many subdirectories is expanded regardless of score:
+#: the listing has already been read, so descending costs one ``scandir`` per child.
+THIN_DIRECTORY = 4
 
 #: Directory names the wide sweep must never enter, lower-cased. System trees, package
 #: managers and browser caches are all large, all irrelevant, and all capable of turning a
@@ -454,6 +481,153 @@ def _sweep(root: Path, *, depth: int) -> list[Path]:
         matches.extend(_sweep(entry, depth=depth - 1))
 
     return matches
+
+
+def deep_sweep(
+    roots: list[Path] | None = None,
+    *,
+    budget_seconds: float = DEEP_BUDGET_SECONDS,
+    max_depth: int = DEEP_MAX_DEPTH,
+    limit: int = MAX_DISCOVERED,
+) -> list[KnownLocation]:
+    r"""Search drives for AI assets by content rather than by folder name.
+
+    The shallow :func:`sweep_drives` finds ``D:\Models`` because it is called "Models".
+    That covers the tidy case and nothing else: on the development machine the real
+    library was four levels inside a project, in ``thorn-nlp\data\hf_cache\hub``, where no
+    name in the path says "model". Finding it means looking at what directories *contain*.
+
+    Looking everywhere is not affordable, so this is a best-first search. Each directory is
+    scored from its listing alone (see
+    :mod:`ai_asset_manager.backend.scanner.scoring`), the most promising is always expanded
+    next, and unpromising branches are simply never entered. The result is that the budget
+    is spent where the assets are: a folder of ISOs scores below the descend threshold and
+    costs one listing, while a directory holding ``config.json`` and a ``.safetensors``
+    pulls the search straight down into it.
+
+    Args:
+        roots: Directories to search; defaults to every drive root.
+        budget_seconds: Wall-clock ceiling. The search stops cleanly when it expires and
+            returns what it found, because a partial answer now beats a complete one after
+            an unbounded wait.
+        max_depth: How far below a root to descend.
+        limit: Maximum locations to return.
+
+    Returns:
+        Locations worth offering, most promising first.
+    """
+    candidates = roots if roots is not None else _drive_roots()
+    deadline = time.monotonic() + budget_seconds
+    found: dict[Path, tuple[float, KnownLocation]] = {}
+    # A max-heap by score, keyed negatively since heapq is a min-heap. The counter breaks
+    # ties without ever comparing Paths, which are not ordered against each other on all
+    # platforms.
+    queue: list[tuple[float, int, Path, int]] = []
+    counter = itertools.count()
+    visited: set[Path] = set()
+
+    for root in candidates:
+        heapq.heappush(queue, (0.0, next(counter), root, 0))
+
+    while queue and len(found) < limit:
+        if time.monotonic() >= deadline:
+            logger.info("Deep sweep stopped at its %.0fs budget", budget_seconds)
+            break
+
+        _, _, current, depth = heapq.heappop(queue)
+        listing = _listing(current)
+        if listing is None:
+            continue
+        _, dirnames = listing
+
+        for child in dirnames:
+            name = child.name.lower()
+            if name in SWEEP_EXCLUDED or name.startswith(("$", "~")):
+                continue
+            try:
+                resolved = child.resolve()
+            except OSError:
+                continue
+            if resolved in visited:
+                continue
+
+            child_listing = _listing(child)
+            if child_listing is None:
+                continue
+            # Marked only once the directory has actually been read. Windows keeps legacy
+            # junctions such as ``C:\Documents and Settings`` that resolve onto real
+            # directories but deny access; claiming the target's identity before the read
+            # succeeds lets one of those hide the directory it points at. That is not
+            # hypothetical -- it hid the entire user profile, and with it every cache
+            # under it, on the machine this was developed against.
+            visited.add(resolved)
+            child_files, child_dirs = child_listing
+            rating = score_directory(
+                child.name,
+                [item.name for item in child_files],
+                [item.name for item in child_dirs],
+            )
+
+            if rating.worth_reporting:
+                found.setdefault(
+                    resolved,
+                    (
+                        rating.score,
+                        KnownLocation(
+                            path=resolved,
+                            label=child.name,
+                            source="deep",
+                            group="Found by deep search",
+                            origin="; ".join(rating.evidence[:2]) or "content match",
+                        ),
+                    ),
+                )
+                # Its children belong to it; the scanner will recurse from here.
+                continue
+
+            if depth + 1 >= max_depth:
+                continue
+
+            # Three reasons to look inside something that showed nothing itself.
+            #
+            # The first two levels are free, because the top of a drive is all container
+            # names and a library's own parent never looks like anything.
+            #
+            # A directory with only a handful of subdirectories is almost free to expand,
+            # and long thin chains are exactly where nested libraries hide: ``data`` ->
+            # ``hf_cache`` -> ``hub`` scores nothing at any step and holds two models at
+            # the end of it. Gating that on interest alone loses them.
+            #
+            # Everything else has to earn the visit.
+            cheap = len(child_dirs) <= THIN_DIRECTORY
+            if rating.worth_descending or depth < DEEP_FREE_DEPTH or cheap:
+                heapq.heappush(queue, (-rating.score, next(counter), child, depth + 1))
+
+    ordered = sorted(found.values(), key=lambda item: -item[0])
+    return [location for _, location in ordered[:limit]]
+
+
+def _listing(path: Path) -> tuple[list[Path], list[Path]] | None:
+    """Return ``(files, directories)`` directly inside a path, or ``None`` if unreadable.
+
+    Unreadable is the normal case often enough — permission-denied system folders, offline
+    OneDrive placeholders, disconnected network drives — that it must not be an error.
+    """
+    files: list[Path] = []
+    directories: list[Path] = []
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        directories.append(Path(entry.path))
+                    else:
+                        files.append(Path(entry.path))
+                except OSError:
+                    continue
+    except (OSError, ValueError):
+        return None
+    return files, directories
 
 
 def discover(*, sweep: bool = True) -> list[KnownLocation]:

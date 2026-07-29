@@ -272,6 +272,13 @@ class AssetProfile:
     _haystack: str | None = field(default=None, repr=False, compare=False)
 
     @property
+    def folder(self) -> str:
+        """Return the name of the directory containing this asset, lower-cased."""
+        trimmed = self.path.replace("\\", "/").rstrip("/")
+        parent = trimmed.rsplit("/", 1)[0] if "/" in trimmed else ""
+        return parent.rsplit("/", 1)[-1].lower()
+
+    @property
     def haystack(self) -> str:
         """Return lower-cased text of every name-like signal, for marker matching.
 
@@ -280,6 +287,15 @@ class AssetProfile:
         """
         if self._haystack is None:
             parts: list[str] = [self.name, self.subkind or ""]
+            if self.is_single_file:
+                # A lone weight file is often named by the folder that holds it and not by
+                # itself: ``.cache/whisper/large-v3-turbo.pt`` says "whisper" nowhere in
+                # the filename, and ``kraken_cache/arabic_historical.mlmodel`` says nothing
+                # about OCR. The containing folder is the naming authority in exactly this
+                # case, and only this one -- for a directory asset the folder *is* the
+                # name, and for anything deeper the path is full of words that mean
+                # nothing about the asset.
+                parts.append(self.folder)
             if self.model is not None:
                 parts += [
                     self.model.architecture or "",

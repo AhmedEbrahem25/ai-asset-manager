@@ -107,7 +107,10 @@ class ScanPipeline:
 
             try:
                 record = self.build_record(
-                    tree, detection, fingerprint_lookup=fingerprint_lookup
+                    tree,
+                    detection,
+                    fingerprint_lookup=fingerprint_lookup,
+                    others=detections,
                 )
             except Exception as exc:
                 logger.warning("Failed to build record for %s: %s", detection.root_path, exc)
@@ -126,14 +129,24 @@ class ScanPipeline:
         detection: DetectionResult,
         *,
         fingerprint_lookup: FingerprintLookup | None = None,
+        others: list[DetectionResult] | None = None,
     ) -> AssetRecord | None:
         """Gather an asset's files, parse its metadata and merge the result.
+
+        Args:
+            tree: The walked tree the detection came from.
+            detection: The asset to build a record for.
+            fingerprint_lookup: Returns a stored fingerprint, to skip unchanged assets.
+            others: Every asset found in the same tree, needed only by containers so they
+                can leave out the assets nested inside them.
 
         Returns:
             The completed record, or ``None`` when the asset has no files at all — which
             happens when a detector matched on structure that has since been deleted.
         """
         files = self._collect_files(tree, detection)
+        if detection.excludes_nested and others:
+            files = self._without_nested(files, detection, others)
         if not files:
             logger.debug("No files found for detected asset at %s", detection.root_path)
             return None
@@ -180,6 +193,28 @@ class ScanPipeline:
             return [entry] if entry is not None else []
 
         return tree.iter_subtree_files(detection.file_root)
+
+    def _without_nested(
+        self,
+        files: list[FileEntry],
+        detection: DetectionResult,
+        others: list[DetectionResult],
+    ) -> list[FileEntry]:
+        """Return only the files that belong to this asset and to nothing more specific."""
+        nested = [
+            _as_prefix(other.file_root)
+            for other in others
+            if other is not detection
+            and _as_prefix(other.file_root).startswith(_as_prefix(detection.file_root))
+            and other.file_root != detection.file_root
+        ]
+        if not nested:
+            return files
+        return [
+            entry
+            for entry in files
+            if not any(_as_prefix(entry.path).startswith(prefix) for prefix in nested)
+        ]
 
     def _scoped_node(self, node: DirNode, files: list[FileEntry]) -> DirNode:
         """Return a copy of a directory node exposing only the given files.
@@ -300,6 +335,18 @@ class ScanPipeline:
                 )
 
         return facts
+
+
+def _as_prefix(path: str) -> str:
+    r"""Return a path in a form safe to compare with ``startswith``.
+
+    Separators are normalised and a trailing one added, so that ``D:\Models2`` is never
+    read as living inside ``D:\Models``.
+    """
+    normalised = path.replace("\\", "/").rstrip("/")
+    if os.name == "nt":
+        normalised = normalised.lower()
+    return normalised + "/"
 
 
 def summarise(records: list[AssetRecord]) -> dict[str, int]:

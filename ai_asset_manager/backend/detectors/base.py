@@ -65,6 +65,15 @@ class DetectionResult:
     #: Whether directories beneath ``root_path`` are part of this asset and must not be
     #: examined separately. False for stores, which contain many independent assets.
     claims_subtree: bool = True
+    #: Whether files belonging to *other* detected assets should be left out of this one.
+    #:
+    #: Set for containers -- a project, a labelling workspace. A project's subtree holds
+    #: the models it produced, and counting those as part of the project both doubles them
+    #: in the storage total and lets their contents decide what the project is classified
+    #: as: on the development machine a project containing twenty-two Weights & Biases runs
+    #: was itself filed as an experiment log. A container's own weight is what is left when
+    #: the assets inside it are taken out.
+    excludes_nested: bool = False
 
     @property
     def file_root(self) -> str:

@@ -12,8 +12,10 @@ fourteen columns of ellipses.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Sequence
 
+from rich.console import OverflowMethod
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
@@ -33,6 +35,28 @@ from ai_asset_manager.backend.utils.paths import shorten_path
 #: wrapped: a folded path spreads one row over fifteen lines and makes the table
 #: unreadable, while the head and tail are what identify a location anyway.
 LOCATION_WIDTH = 38
+
+
+def _overflow() -> OverflowMethod:
+    """Return the column overflow mode this output stream can actually render.
+
+    Rich truncates with U+2026, and the Windows console still defaults to cp1252, which
+    cannot encode it -- every shortened cell comes out as a replacement character. Rich
+    already downgrades its box drawing on such a stream but has no equivalent for the
+    ellipsis, so the choice has to be made here: cropping loses one character of
+    information, while an unencodable ellipsis loses the reader's confidence in the whole
+    table.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or ""
+    try:
+        "…".encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return "crop"
+    return "ellipsis"
+
+
+#: Resolved once: the stream's encoding does not change while a command runs.
+OVERFLOW = _overflow()
 
 #: Minimum width of the label column in a breakdown table, wide enough that the longest
 #: heading ("Storage by framework") fits on one line.
@@ -97,26 +121,26 @@ def render_table(items: Sequence[InventoryItem], *, show_details: bool = False) 
     """
     table = Table(box=None, pad_edge=False, header_style="bold", expand=False)
     table.add_column("Name", style="cyan", min_width=14, max_width=34,
-                     overflow="ellipsis", no_wrap=True)
-    table.add_column("Category", max_width=18, overflow="ellipsis", no_wrap=True)
-    table.add_column("Task", max_width=20, overflow="ellipsis", no_wrap=True)
+                     overflow=OVERFLOW, no_wrap=True)
+    table.add_column("Category", max_width=18, overflow=OVERFLOW, no_wrap=True)
+    table.add_column("Task", max_width=20, overflow=OVERFLOW, no_wrap=True)
 
     if show_details:
-        table.add_column("Family", max_width=14, overflow="ellipsis", no_wrap=True)
-        table.add_column("Architecture", max_width=22, overflow="ellipsis", no_wrap=True)
+        table.add_column("Family", max_width=14, overflow=OVERFLOW, no_wrap=True)
+        table.add_column("Architecture", max_width=22, overflow=OVERFLOW, no_wrap=True)
         table.add_column("Params", justify="right", no_wrap=True)
-        table.add_column("Quant", max_width=10, overflow="ellipsis", no_wrap=True)
+        table.add_column("Quant", max_width=10, overflow=OVERFLOW, no_wrap=True)
 
-    table.add_column("Framework", max_width=13, overflow="ellipsis", no_wrap=True)
+    table.add_column("Framework", max_width=13, overflow=OVERFLOW, no_wrap=True)
     table.add_column("Size", justify="right", no_wrap=True)
 
     if show_details:
         table.add_column("Files", justify="right", no_wrap=True)
-        table.add_column("Modified", style="dim", max_width=14, overflow="ellipsis",
+        table.add_column("Modified", style="dim", max_width=14, overflow=OVERFLOW,
                          no_wrap=True)
 
     table.add_column(
-        "Location", style="dim", max_width=LOCATION_WIDTH, no_wrap=True, overflow="ellipsis"
+        "Location", style="dim", max_width=LOCATION_WIDTH, no_wrap=True, overflow=OVERFLOW
     )
 
     for item in items:
@@ -156,16 +180,16 @@ def render_dataset_table(items: Sequence[InventoryItem]) -> Table:
     """
     table = Table(box=None, pad_edge=False, header_style="bold")
     table.add_column("Name", style="green", min_width=14, max_width=30,
-                     overflow="ellipsis", no_wrap=True)
-    table.add_column("Task", max_width=20, overflow="ellipsis", no_wrap=True)
-    table.add_column("Format", max_width=14, overflow="ellipsis", no_wrap=True)
+                     overflow=OVERFLOW, no_wrap=True)
+    table.add_column("Task", max_width=20, overflow=OVERFLOW, no_wrap=True)
+    table.add_column("Format", max_width=14, overflow=OVERFLOW, no_wrap=True)
     table.add_column("Samples", justify="right", no_wrap=True)
     table.add_column("Classes", justify="right", no_wrap=True)
-    table.add_column("Splits", max_width=18, overflow="ellipsis", no_wrap=True)
+    table.add_column("Splits", max_width=18, overflow=OVERFLOW, no_wrap=True)
     table.add_column("Size", justify="right", no_wrap=True)
     table.add_column("Health", justify="right", no_wrap=True)
     table.add_column(
-        "Location", style="dim", max_width=LOCATION_WIDTH, no_wrap=True, overflow="ellipsis"
+        "Location", style="dim", max_width=LOCATION_WIDTH, no_wrap=True, overflow=OVERFLOW
     )
 
     for item in items:
@@ -268,6 +292,14 @@ def _detail_rows(item: InventoryItem) -> list[tuple[str, str]]:
     if item.tags:
         rows.append(("Tags", ", ".join(item.tags)))
 
+    # Grouped by relation, so a run that produced six checkpoints says so on one line
+    # instead of six.
+    related: dict[str, list[str]] = {}
+    for relation, other in item.links:
+        related.setdefault(relation, []).append(other)
+    for relation, others in related.items():
+        rows.append((relation, ", ".join(others)))
+
     if item.health is not None and item.health.evaluated:
         rows.append(("Health", _health_cell(item)))
         for finding in item.health.findings:
@@ -284,8 +316,8 @@ def render_health(items: Sequence[InventoryItem]) -> Table:
     """Render a health listing: what is wrong, with what, and how to fix it."""
     table = Table(box=None, pad_edge=False, header_style="bold")
     table.add_column("Name", style="cyan", min_width=14, max_width=30,
-                     overflow="ellipsis", no_wrap=True)
-    table.add_column("Category", max_width=18, overflow="ellipsis", no_wrap=True)
+                     overflow=OVERFLOW, no_wrap=True)
+    table.add_column("Category", max_width=18, overflow=OVERFLOW, no_wrap=True)
     table.add_column("Score", justify="right", no_wrap=True)
     table.add_column("Findings", overflow="fold")
 

@@ -315,7 +315,13 @@ def build_asset_record(
         warnings=list(facts.warnings),
     )
 
-    if kind is AssetKind.DATASET:
+    if kind in _STRUCTURAL_KINDS:
+        # A project, a training run and a labelling task are none of them weights, so
+        # attaching model details would invent an architecture and a parameter count for
+        # something that has neither. Their subkind, evidence and file list say everything
+        # that is true about them.
+        record.subkind = record.subkind or detection.subkind
+    elif kind is AssetKind.DATASET:
         record.dataset = build_dataset_facts(
             facts, fallback_subkind=detection.subkind, evidence=detection.evidence
         )
@@ -332,6 +338,12 @@ def build_asset_record(
     record.evidence["provenance"] = facts.provenance()
     return record
 
+
+#: Kinds that describe a *container of work* rather than a weight file or a corpus, and so
+#: carry neither model nor dataset details.
+_STRUCTURAL_KINDS = frozenset(
+    {AssetKind.PROJECT, AssetKind.EXPERIMENT, AssetKind.ANNOTATION_PROJECT}
+)
 
 #: Extensions that hold annotations rather than media.
 _ANNOTATION_EXTENSIONS = frozenset({".json", ".xml", ".txt", ".csv", ".yaml", ".yml"})

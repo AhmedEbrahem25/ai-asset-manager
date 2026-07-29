@@ -17,6 +17,14 @@ class AssetKind(StrEnum):
     DATASET = "dataset"
     ADAPTER = "adapter"
     CHECKPOINT = "checkpoint"
+    #: A codebase that trains or serves models. A container of assets rather than an
+    #: asset's contents, which is why its detector never claims its own subtree.
+    PROJECT = "project"
+    #: One training or evaluation run: a TensorBoard log directory, a W&B run, an MLflow
+    #: run, an Ultralytics ``runs/detect/train`` folder.
+    EXPERIMENT = "experiment"
+    #: A labelling project: CVAT, Label Studio, Roboflow, Supervisely.
+    ANNOTATION_PROJECT = "annotation_project"
     PAPER = "paper"
     TRAINING_CONFIG = "training_config"
     UNKNOWN = "unknown"

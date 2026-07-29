@@ -39,8 +39,35 @@ detection, segmentation, pose, OCR, speech recognition, TTS, image generation.
 
 **Dataset layouts**, identified by structure rather than by name — COCO, YOLO, Pascal VOC,
 ImageNet, KITTI, Waymo, nuScenes, BDD100K, Cityscapes, MOT, CrowdHuman, Open Images,
-ADE20K, LVIS, HuggingFace datasets, plus generic classification, segmentation, tracking,
-video, audio and NLP corpora.
+ADE20K, LVIS, HuggingFace datasets, MNIST-family IDX archives, plus generic classification,
+segmentation, tracking, video, audio, tabular and NLP corpora.
+
+**The work around them** — AI projects (the codebase that trained the thing), training runs
+from TensorBoard, Weights & Biases, MLflow, Ultralytics and Lightning, checkpoints, and
+labelling projects from CVAT, Label Studio, Roboflow and Supervisely.
+
+## Where an asset starts and stops
+
+The hardest part of discovery is not recognising a model, it is knowing *which directory is
+the model*. An asset is the smallest directory representing one logical thing:
+`F:\Models\Qwen2.5-7B` is an asset, `F:\Models` is a shelf that holds assets, and `F:\` is a
+disk.
+
+Nothing structural separates those three — all are directories with files below — so the
+distinction is drawn deliberately. Generic rules (the ones that infer a dataset from a pile
+of files) must pass a boundary test before they may claim a directory; specific ones do not,
+because `annotations/instances_train.json` is proof wherever it sits.
+
+That guard exists because the alternative is not a stray extra row. Detection runs parents
+before children and a claim suppresses everything below it, so a rule that fires too high
+*deletes* every correct answer underneath it. Pointed at this repository's development
+machine, the old generic rule found two `.jsonl` files five levels down and filed a
+372-directory project as one NLP dataset — hiding two HuggingFace models, three PaddleOCR
+models, a Kraken model, eleven checkpoints and twenty-two W&B runs behind a single wrong row.
+
+Bulk is never evidence on its own. A thousand screenshots and a thousand training images are
+the same shape, so media only counts as a dataset when something says it was *assembled*: a
+split layout, a manifest, or labels beside it.
 
 ## Staying up to date
 
@@ -70,6 +97,26 @@ Add these to your AI library? [Y]es / [N]o / [E]dit:
 
 It runs once. Declining is remembered, so you are not asked again; `aam discover --all`
 re-offers what you turned down.
+
+**`aam discover --deep`** searches by *content* rather than by name, which is what finds the
+libraries no folder name announces. It scores every directory from its own listing — weight
+files, a `config.json` beside a `tokenizer.json`, a folder of `models--*` entries, event
+files — descends only into the promising ones, and stops at a time budget:
+
+```console
+$ aam discover --deep
+Searching your drives by content (up to 60s)...
+
+Found by deep search
+  1  hub             C:\Users\pc\.cache\huggingface\hub          <- 12 cached repo(s)
+  2  hub             F:\project\NLP-Project\...\data\hf_cache\hub  <- 2 cached repo(s)
+  3  kraken_cache    F:\project\NLP-Project\...\data\kraken_cache  <- 1 weight file(s)
+```
+
+The second row is the point: a HuggingFace cache four levels inside a project, where nothing
+in the path says "model". On the development machine a full pass over both drives takes
+0.2 s, because directories full of ISOs and installers score below the descend threshold and
+cost one listing each.
 
 **`aam watch`** keeps the catalogue in step as files change. Events are debounced, so
 copying a thousand files produces one update rather than a thousand, and each update
@@ -131,7 +178,23 @@ score** with specific findings.
 | `aam inventory missing` | Only what needs attention. |
 | `aam inventory --group-by task\|domain\|family\|drive\|…` | Cut it a different way. |
 | `aam inventory --export csv\|json\|markdown` | Take it elsewhere. |
+| `aam inventory projects\|experiments` | Which codebases and training runs produced all this? |
 | `aam where <name>` | Where did I put it? |
+
+Assets are also linked to each other. Containment is derived after every scan — a checkpoint
+inside a run was produced by it, a model inside a project belongs to it — and an adapter is
+matched to the base model it declares. `aam inventory --details` reads the edges back:
+
+```
+best_dapt
+  Category   Checkpoint
+  Size       507.4 MiB
+  Part of    clause_detector
+```
+
+That line is the difference between a row you can act on and one you cannot: "a 507 MiB
+checkpoint called best_dapt" is not something you can decide about, and "a checkpoint from
+the clause-detector project" is.
 
 Health findings are derived from the file list the scanner recorded, which is why they cost
 nothing to compute. A sharded model states its expected shard count in every filename, so

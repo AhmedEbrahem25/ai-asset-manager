@@ -38,7 +38,11 @@ from ai_asset_manager.backend.inventory.categories import (
     section_order,
     task_label,
 )
-from ai_asset_manager.backend.inventory.profile import build_profile, load_file_summaries
+from ai_asset_manager.backend.inventory.profile import (
+    build_profile,
+    load_file_summaries,
+    load_links,
+)
 from ai_asset_manager.backend.models import Asset, DatasetDetails, ModelDetails
 from ai_asset_manager.backend.taxonomy import HealthReport, TaxonomyRegistry, default_registry
 from ai_asset_manager.logging_conf import get_logger
@@ -107,6 +111,11 @@ class InventoryItem:
 
     tags: list[str] = field(default_factory=list)
     is_missing: bool = False
+
+    #: Relationships to other assets, as ``(relation, other asset's name)`` pairs. What
+    #: turns "a checkpoint called best_dapt" into "a checkpoint from the clause-detector
+    #: run", which is the difference between a row you can act on and one you cannot.
+    links: tuple[tuple[str, str], ...] = ()
 
     @property
     def category_label(self) -> str:
@@ -399,7 +408,8 @@ class InventoryEngine:
         # you happened to run. It is one indexed query, and it is what dataset
         # intelligence is built from.
         summaries = load_file_summaries(self.session, [row[0].id for row in rows])
-        items = [self._to_item(row, summaries) for row in rows]
+        links = load_links(self.session, [row[0].id for row in rows])
+        items = [self._to_item(row, summaries, links) for row in rows]
 
         if categories is not None:
             wanted = set(categories)
@@ -485,7 +495,12 @@ class InventoryEngine:
 
         return self.session.execute(statement).all()
 
-    def _to_item(self, row: Any, summaries: dict[int, Any]) -> InventoryItem:
+    def _to_item(
+        self,
+        row: Any,
+        summaries: dict[int, Any],
+        links: dict[int, tuple[tuple[str, str], ...]] | None = None,
+    ) -> InventoryItem:
         """Convert one joined row into a classified, measured inventory item."""
         asset: Asset = row[0]
         model: ModelDetails | None = row[1]
@@ -516,6 +531,7 @@ class InventoryEngine:
             evidence=verdict.evidence,
             stats=self.registry.statistics(profile),
             health=self.registry.check_health(profile),
+            links=(links or {}).get(asset.id, ()),
             tags=[tag.name for tag in asset.tags],
             is_missing=asset.is_missing,
         )

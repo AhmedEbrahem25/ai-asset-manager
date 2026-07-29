@@ -45,6 +45,11 @@ OCR_FAMILIES = (
     ("Donut", ("donut",)),
     ("docTR", ("doctr",)),
     ("Tesseract", ("tesseract",)),
+    # Kraken and Calamari are the historical-document engines; their models are single
+    # ``.mlmodel``/``.ckpt`` files whose names describe the script rather than the tool,
+    # so the containing folder is usually what identifies them.
+    ("Kraken", ("kraken",)),
+    ("Calamari", ("calamari",)),
     ("LayoutLM", ("layoutlm",)),
     ("Kosmos", ("kosmos-2.5", "kosmos_2_5")),
     ("Qari", ("qari",)),

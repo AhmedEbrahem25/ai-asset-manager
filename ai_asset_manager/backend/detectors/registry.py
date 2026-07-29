@@ -15,19 +15,39 @@ folder itself holding nothing.
 
 from __future__ import annotations
 
-from ai_asset_manager.backend.detectors.base import AssetDetector, DetectionResult
+from ai_asset_manager.backend.detectors.annotation import (
+    CvatProjectDetector,
+    LabelStudioDetector,
+    RoboflowExportDetector,
+    SupervisleyProjectDetector,
+)
+from ai_asset_manager.backend.detectors.base import (
+    PRIORITY_DATASET_GENERIC,
+    AssetDetector,
+    DetectionResult,
+)
+from ai_asset_manager.backend.detectors.boundary import may_claim_generic
 from ai_asset_manager.backend.detectors.datasets import (
     Bdd100kDetector,
     CityscapesDetector,
     CocoDetector,
     HfDatasetCacheDetector,
+    IdxUbyteDetector,
     ImageClassificationDetector,
     KittiDetector,
     MediaCollectionDetector,
     MotDetector,
     NuScenesDetector,
     PascalVocDetector,
+    TabularDatasetDetector,
     YoloDetector,
+)
+from ai_asset_manager.backend.detectors.experiments import (
+    LightningLogsDetector,
+    MlflowRunDetector,
+    TensorBoardDetector,
+    UltralyticsRunDetector,
+    WandbRunDetector,
 )
 from ai_asset_manager.backend.detectors.models import (
     DiffusersDetector,
@@ -37,10 +57,12 @@ from ai_asset_manager.backend.detectors.models import (
     MlxDetector,
     OllamaStoreDetector,
     OpenVinoDetector,
+    PaddleInferenceDetector,
     PeftAdapterDetector,
     SentenceTransformerDetector,
     TensorFlowSavedModelDetector,
 )
+from ai_asset_manager.backend.detectors.projects import AIProjectDetector
 from ai_asset_manager.backend.scanner.context import DirectoryContext
 from ai_asset_manager.backend.scanner.types import DirectoryTree
 from ai_asset_manager.logging_conf import get_logger
@@ -63,6 +85,18 @@ def default_detectors() -> list[AssetDetector]:
         TensorFlowSavedModelDetector(),
         OpenVinoDetector(),
         MlxDetector(),
+        PaddleInferenceDetector(),
+        # Training runs and labelling work. Above the dataset bands, because a run
+        # directory full of predictions must be read as a run and not as a corpus.
+        TensorBoardDetector(),
+        WandbRunDetector(),
+        MlflowRunDetector(),
+        UltralyticsRunDetector(),
+        LightningLogsDetector(),
+        CvatProjectDetector(),
+        LabelStudioDetector(),
+        RoboflowExportDetector(),
+        SupervisleyProjectDetector(),
         # Named dataset layouts.
         CocoDetector(),
         YoloDetector(),
@@ -73,9 +107,15 @@ def default_detectors() -> list[AssetDetector]:
         MotDetector(),
         Bdd100kDetector(),
         HfDatasetCacheDetector(),
+        IdxUbyteDetector(),
+        # Codebases. Below the dataset layouts so a directory that genuinely is a dataset
+        # stays one even with a training script beside it; above the generic fallbacks so
+        # a project is never mistaken for the pile of files at its root.
+        AIProjectDetector(),
         # Generic fallbacks.
         ImageClassificationDetector(),
         MediaCollectionDetector(),
+        TabularDatasetDetector(),
         LooseWeightsDetector(),
     ]
 
@@ -111,6 +151,10 @@ class DetectorRegistry:
 
         A detector that raises is logged and skipped, so one bad heuristic cannot abort
         the scan of a whole drive.
+
+        Results from the generic band are additionally passed through the boundary guard.
+        Enforcing it here rather than inside each detector means a new generic heuristic
+        cannot reintroduce the whole-drive-as-one-dataset failure by forgetting to ask.
         """
         results_by_priority: dict[int, list[DetectionResult]] = {}
 
@@ -120,6 +164,9 @@ class DetectorRegistry:
             except Exception as exc:
                 logger.warning("Detector %s failed on %s: %s", detector.name, ctx.path, exc)
                 continue
+
+            if detector.priority <= PRIORITY_DATASET_GENERIC:
+                found = self._within_boundary(ctx, found, detector.name)
 
             if found:
                 results_by_priority.setdefault(detector.priority, []).extend(found)
@@ -138,6 +185,29 @@ class DetectorRegistry:
             if existing is None or result.confidence > existing.confidence:
                 by_path[result.root_path] = result
         return list(by_path.values())
+
+    def _within_boundary(
+        self, ctx: DirectoryContext, results: list[DetectionResult], detector: str
+    ) -> list[DetectionResult]:
+        """Drop generic directory-shaped claims that fail the asset-boundary test.
+
+        Single-file results are exempt: a lone ``yolo11n.pt`` sitting in ``Downloads`` is a
+        model, and the folder it landed in says nothing about it either way. It is the
+        claim on a *directory* that has to justify itself.
+        """
+        if not results:
+            return results
+
+        allowed, reason = may_claim_generic(ctx)
+        if allowed:
+            return results
+
+        kept = [result for result in results if result.is_single_file]
+        if len(kept) != len(results):
+            logger.debug(
+                "Boundary guard: %s may not claim %s (%s)", detector, ctx.path, reason
+            )
+        return kept
 
     def detect_tree(self, tree: DirectoryTree) -> list[DetectionResult]:
         """Detect every asset in a walked tree.

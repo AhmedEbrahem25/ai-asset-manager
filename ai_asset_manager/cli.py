@@ -45,6 +45,7 @@ from ai_asset_manager.backend.inventory import (
     suggest_filename,
 )
 from ai_asset_manager.backend.inventory.render import (
+    OVERFLOW,
     render_dataset_table,
     render_details,
     render_distribution,
@@ -57,6 +58,7 @@ from ai_asset_manager.backend.inventory.render import (
     render_tree,
 )
 from ai_asset_manager.backend.models import Asset, ScanRun
+from ai_asset_manager.backend.scanner.locations import DEEP_BUDGET_SECONDS, DEEP_MAX_DEPTH
 from ai_asset_manager.backend.scanner.progress import ScanContext, ScanPhase, ScanProgress
 from ai_asset_manager.backend.services.asset_service import AssetFilter, AssetService
 from ai_asset_manager.backend.services.discovery_service import DiscoveryService
@@ -345,6 +347,22 @@ def discover(
         bool,
         typer.Option("--sweep/--no-sweep", help="Also look for asset folders on your drives."),
     ] = True,
+    deep: Annotated[
+        bool,
+        typer.Option("--deep", help="Search drives by content, not just by folder name."),
+    ] = False,
+    max_seconds: Annotated[
+        float,
+        typer.Option("--max-seconds", help="Time budget for --deep.", min=1.0),
+    ] = DEEP_BUDGET_SECONDS,
+    depth: Annotated[
+        int,
+        typer.Option("--depth", help="How far below each root --deep may descend.", min=1),
+    ] = DEEP_MAX_DEPTH,
+    where: Annotated[
+        list[str] | None,
+        typer.Option("--in", help="Restrict --deep to these folders.", metavar="PATH"),
+    ] = None,
 ) -> None:
     """Find where AI assets are stored on this machine and offer to catalogue them.
 
@@ -353,11 +371,28 @@ def discover(
     below each drive root for folders named like a model library. System directories are
     never entered.
 
+    Add --deep to search by *content* instead of by name. That is what finds a library
+    nested inside a project, where nothing in the path says "model" -- it scores each
+    directory from its own listing and follows only the promising ones, on a time budget.
+
     Nothing is scanned until you say so.
     """
+    if deep:
+        console.print(
+            f"[dim]Searching {'the named folders' if where else 'your drives'} "
+            f"by content (up to {max_seconds:.0f}s)...[/dim]"
+        )
+
     with session_scope() as session:
         service = DiscoveryService(session)
-        report = service.discover(include_declined=include_declined, sweep=sweep)
+        report = service.discover(
+            include_declined=include_declined,
+            sweep=sweep,
+            deep=deep,
+            budget_seconds=max_seconds,
+            max_depth=depth,
+            roots=[Path(item) for item in where] if where else None,
+        )
 
         if not report.total_found:
             console.print(
@@ -413,7 +448,10 @@ def _print_discovery(report: Any) -> None:
         console.print(f"[bold cyan]{group}[/bold cyan]")
         table = Table(box=None, pad_edge=False, show_header=False, padding=(0, 2, 0, 2))
         table.add_column(style="green", no_wrap=True, width=3)
-        table.add_column(no_wrap=True, max_width=24, overflow="ellipsis")
+        # "crop" rather than "ellipsis": Rich's ellipsis is U+2026, which the Windows
+        # console's cp1252 encoding cannot represent, and a truncated label is worth less
+        # than a command that does not raise UnicodeEncodeError.
+        table.add_column(no_wrap=True, max_width=26, overflow="crop")
         table.add_column(style="dim", overflow="fold")
         for item in items:
             # Numbered against the full candidate list, not the group, so that the numbers
@@ -747,7 +785,7 @@ def _asset_table(assets: Sequence[Asset], *, show_paths: bool) -> Table:
     """Render assets as a table."""
     table = Table(box=None, pad_edge=False, header_style="bold")
     table.add_column("ID", justify="right", style="dim")
-    table.add_column("Name", style="cyan", max_width=42, overflow="ellipsis")
+    table.add_column("Name", style="cyan", max_width=42, overflow=OVERFLOW)
     table.add_column("Kind", max_width=10)
     table.add_column("Size", justify="right")
 
@@ -1174,10 +1212,10 @@ def where(
         # width, and Rich makes room by dropping other columns — losing Name, which is
         # the one column that must always survive.
         table.add_column("Name", style="cyan", min_width=12, max_width=34,
-                         overflow="ellipsis", no_wrap=True)
-        table.add_column("Category", max_width=18, overflow="ellipsis", no_wrap=True)
+                         overflow=OVERFLOW, no_wrap=True)
+        table.add_column("Category", max_width=18, overflow=OVERFLOW, no_wrap=True)
         table.add_column("Size", justify="right", no_wrap=True)
-        table.add_column("Location", max_width=60, overflow="ellipsis", no_wrap=True)
+        table.add_column("Location", max_width=60, overflow=OVERFLOW, no_wrap=True)
 
         for item in matches:
             table.add_row(
@@ -1229,7 +1267,7 @@ def stats() -> None:
         largest = service.largest(5)
         if largest:
             table = Table(box=None, pad_edge=False, title="Largest assets", title_justify="left")
-            table.add_column("Name", style="cyan", max_width=46, overflow="ellipsis")
+            table.add_column("Name", style="cyan", max_width=46, overflow=OVERFLOW)
             table.add_column("Size", justify="right")
             for asset in largest:
                 table.add_row(asset.display_name or asset.name, format_bytes(asset.size_bytes))
@@ -1249,6 +1287,7 @@ def version(
     failed to bundle its plugins still runs, still prints tables, and quietly files every
     asset as "unclassified" - so it is worth being able to check in one command.
     """
+    from ai_asset_manager.backend.detectors.registry import default_detectors
     from ai_asset_manager.backend.taxonomy import default_registry
 
     settings = get_settings()
@@ -1261,6 +1300,9 @@ def version(
         f"Taxonomy: {len(registry.categories())} categories, "
         f"{len(registry.tasks())} tasks from {len(registry.plugins())} plugins"
     )
+    # Reported for the same reason as the plugin count: a build that lost its detectors
+    # scans happily and finds nothing, which looks identical to an empty disk.
+    console.print(f"Detectors: {len(default_detectors())}")
 
     if plugins:
         console.print()
@@ -1285,6 +1327,7 @@ def guide() -> None:
     recipes: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("Getting started", (
             ("aam discover", "find where AI assets live, and offer to catalogue them"),
+            ("aam discover --deep", "search by content: finds libraries buried in projects"),
             ("aam scan --auto", "catalogue every cache found on this machine"),
             ("aam scan D:\\Models E:\\Datasets", "catalogue specific folders"),
             ("aam scan --add D:\\Models", "remember the folder for next time"),
@@ -1301,8 +1344,10 @@ def guide() -> None:
             ("aam inventory llm", "just the language models"),
             ("aam inventory ocr", "just the OCR models"),
             ("aam inventory datasets", "just the datasets"),
+            ("aam inventory projects", "the codebases that produced all this"),
+            ("aam inventory experiments", "training runs, W&B, MLflow, TensorBoard"),
             ("aam inventory --tree", "the shape of the library"),
-            ("aam inventory --details", "everything known about each asset"),
+            ("aam inventory --details", "everything known, including what relates to what"),
         )),
         ("Cutting it a different way", (
             ("aam inventory --group-by task", "grouped by what things are for"),
@@ -1408,7 +1453,7 @@ def status() -> None:
 
         console.print("\n[bold]Managed folders[/bold]")
         root_table = Table(box=None, pad_edge=False, header_style="bold")
-        root_table.add_column("Folder", style="cyan", max_width=52, overflow="ellipsis")
+        root_table.add_column("Folder", style="cyan", max_width=52, overflow=OVERFLOW)
         root_table.add_column("Assets", justify="right")
         root_table.add_column("Last scanned", style="dim")
         root_table.add_column("", style="dim")

@@ -21,7 +21,13 @@ from collections.abc import Iterable, Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ai_asset_manager.backend.models import Asset, AssetFile, DatasetDetails, ModelDetails
+from ai_asset_manager.backend.models import (
+    Asset,
+    AssetFile,
+    AssetLink,
+    DatasetDetails,
+    ModelDetails,
+)
 from ai_asset_manager.backend.taxonomy.types import (
     AssetProfile,
     DatasetFacts,
@@ -97,6 +103,62 @@ def load_file_summaries(
 
     return {
         asset_id: accumulator.finish() for asset_id, accumulator in accumulators.items()
+    }
+
+
+#: How an edge reads in a detail view, from the point of view of each end. A checkpoint
+#: says "Produced by: train-3"; the run says "Produced: best.pt". Same row, two sentences.
+_RELATION_LABELS: dict[str, tuple[str, str]] = {
+    "belongs_to": ("Part of", "Contains"),
+    "produced_by": ("Produced by", "Produced"),
+    "adapts": ("Adapts", "Adapted by"),
+    "derived_from": ("Derived from", "Source of"),
+    "trained_on": ("Trained on", "Used to train"),
+}
+
+#: Cap on edges reported per asset. A project with sixty runs beneath it would otherwise
+#: bury its own detail block; the count is what matters at that point, not the list.
+MAX_LINKS_PER_ASSET = 8
+
+
+def load_links(
+    session: Session, asset_ids: Sequence[int]
+) -> dict[int, tuple[tuple[str, str], ...]]:
+    """Return each asset's relationships, described from that asset's own side.
+
+    Both directions are loaded, because an edge is interesting to both ends: the run wants
+    to list what it produced and the checkpoint wants to name the run that produced it, and
+    the graph stores that once.
+    """
+    if not asset_ids:
+        return {}
+
+    wanted = set(asset_ids)
+    names: dict[int, str] = {
+        row[0]: row[1]
+        for row in session.execute(
+            select(Asset.id, Asset.name).where(Asset.id.in_(wanted))
+        ).all()
+    }
+    collected: dict[int, list[tuple[str, str]]] = {}
+
+    for chunk in _chunked(asset_ids, _ID_CHUNK):
+        rows = session.execute(
+            select(AssetLink.source_id, AssetLink.target_id, AssetLink.relation).where(
+                AssetLink.source_id.in_(chunk) | AssetLink.target_id.in_(chunk)
+            )
+        ).all()
+
+        for source_id, target_id, relation in rows:
+            forward, reverse = _RELATION_LABELS.get(relation, (relation, relation))
+            if source_id in wanted and target_id in names:
+                collected.setdefault(source_id, []).append((forward, names[target_id]))
+            if target_id in wanted and source_id in names:
+                collected.setdefault(target_id, []).append((reverse, names[source_id]))
+
+    return {
+        asset_id: tuple(sorted(set(edges))[:MAX_LINKS_PER_ASSET])
+        for asset_id, edges in collected.items()
     }
 
 
