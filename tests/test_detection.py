@@ -304,6 +304,22 @@ class TestDatasetDetection:
 
         assert pipeline.scan_root(tmp_path) == []
 
+    def test_hf_detector_does_not_claim_a_scan_root_from_nested_shards(
+        self, tmp_path: Path, pipeline
+    ) -> None:
+        """A broad scan must keep a dataset's boundaries instead of swallowing the drive."""
+        (tmp_path / "README.md").write_text("ordinary project readme")
+        dataset = tmp_path / "datasets" / "records"
+        dataset.mkdir(parents=True)
+        (dataset / "dataset_info.json").write_text("{}")
+        (dataset / "part-000.parquet").write_bytes(b"PAR1")
+
+        records = pipeline.scan_root(tmp_path)
+
+        assert len(records) == 1
+        assert records[0].root_path == str(dataset)
+        assert records[0].dataset.dataset_format is DatasetFormat.HF_DATASET
+
 
 class TestMixedTree:
     def test_everything_is_found_exactly_once(self, tmp_path: Path, pipeline) -> None:

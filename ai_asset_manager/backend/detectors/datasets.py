@@ -353,9 +353,14 @@ class HfDatasetCacheDetector(BaseDetector):
     priority = PRIORITY_DATASET_SPECIFIC
 
     def detect(self, ctx: DirectoryContext) -> list[DetectionResult]:
-        """Emit one dataset when Arrow or Parquet shards sit beside dataset metadata."""
-        parquet = ctx.count_extension(".parquet")
-        arrow = ctx.count_extension(".arrow")
+        """Emit one dataset when its own Arrow/Parquet shards sit beside metadata.
+
+        Shards must be direct children of the candidate directory.  Counting an entire
+        subtree lets a drive root with a README and a few unrelated Parquet files claim
+        every dataset below it as one giant HuggingFace dataset.
+        """
+        parquet = sum(1 for entry in ctx.files if entry.extension == ".parquet")
+        arrow = sum(1 for entry in ctx.files if entry.extension == ".arrow")
         has_metadata = ctx.has_any(
             "dataset_info.json", "dataset_infos.json", "state.json", "README.md"
         )
