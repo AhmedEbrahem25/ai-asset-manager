@@ -55,6 +55,7 @@ _CONTAINER_KINDS: dict[str, tuple[str, str | None]] = {
 _DERIVED_KINDS: dict[str, tuple[str, str | None]] = {
     AssetKind.CHECKPOINT.value: ("checkpoint", "checkpointing"),
     AssetKind.EXPERIMENT.value: ("experiment_log", "experiment_tracking"),
+    AssetKind.MODEL.value: ("model", None),
 }
 
 
@@ -75,6 +76,14 @@ def register(registry: TaxonomyRegistry) -> None:
             id="ai_project", label="AI Project", section="experiments", order=390,
             domain="mlops", aliases=("projects", "repos", "codebases"),
             description="A codebase that trains, serves or evaluates models.",
+        )
+    )
+
+    registry.add_category(
+        Category(
+            id="model", label="Model", section="models", order=500,
+            domain="general", aliases=("unidentified", "generic-models"),
+            description="A weight file whose purpose could not be determined.",
         )
     )
 
@@ -104,7 +113,7 @@ def _shelve(
     return Classification(
         category=category,
         task=task,
-        domain="mlops",
+        domain="mlops" if category != "model" else "general",
         confidence=CONFIDENCE_STRONG,
         evidence=f"detected as {profile.detector or profile.kind}",
     )

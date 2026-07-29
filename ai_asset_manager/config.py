@@ -78,6 +78,13 @@ DEFAULT_EXCLUDED_DIRS: frozenset[str] = frozenset(
         ".rustup",
         ".pnpm-store",
         ".yarn",
+        # Python package caches. The same thing as `site-packages`, one step earlier:
+        # unpacked wheels, including their test fixtures. `pyarrow`'s bundled sample
+        # Parquet files were being catalogued as HuggingFace datasets.
+        "appdata\\local\\uv\\cache",
+        "appdata\\local\\pip\\cache",
+        ".cache\\uv",
+        ".cache\\pip",
         ".trash",
         ".trash-1000",
         "lost+found",

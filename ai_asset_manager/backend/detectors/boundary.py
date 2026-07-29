@@ -60,7 +60,34 @@ MIN_UNSTRUCTURED_IMAGES = 200
 DATASET_MANIFESTS: tuple[str, ...] = (
     "data.yaml", "data.yml", "dataset.yaml", "dataset_info.json", "dataset_infos.json",
     "dataset_dict.json", "classes.txt", "labels.txt", "metadata.jsonl", "manifest.json",
-    "annotations.json", "state.json",
+    "manifest.jsonl", "annotations.json", "state.json", "_stats.json", "stats.json",
+)
+
+#: Directory names that mean "an application writes its state here". Never a dataset,
+#: however dataset-shaped the contents look.
+#:
+#: This is the class of false positive a whole-machine scan turns up by the dozen. Chat
+#: transcripts, IDE telemetry and agent session records are all line-delimited JSON, which
+#: is exactly what an NLP corpus is; on the development machine fifty of them were
+#: catalogued as datasets. Nothing about the *files* distinguishes them. The directory's
+#: name does.
+APPLICATION_STATE_NAMES: frozenset[str] = frozenset(
+    {
+        "log", "logs", "telemetry", "crashes", "crashreports", "diagnostics",
+        "sessions", "settingslogs", "history", "subagents",
+        "workspacestorage", "globalstorage", "localstorage", "sessionstorage",
+        "eventlog", "journal", "traces",
+        # Agent and editor state directories. Their transcripts are line-delimited JSON
+        # sitting in per-project folders, which is a corpus down to the byte.
+        ".claude", ".codex", ".cursor", ".aider", ".continue", ".gemini",
+        ".antigravity", ".copilot", ".ollama-ui",
+    }
+)
+
+#: Substrings of the same thing, for names that carry an identifier or a prefix:
+#: ``mcp-logs-ide``, ``emptyWindowChatSessions``.
+APPLICATION_STATE_TOKENS: tuple[str, ...] = (
+    "mcp-logs", "crashpad", "sentry", "chatsessions", "chat-sessions",
 )
 
 
@@ -76,6 +103,25 @@ def is_drive_root(path: str) -> bool:
 def is_container_name(name: str) -> bool:
     """Report whether a directory's own name marks it as holding assets, not being one."""
     return name.strip().lower() in CONTAINER_NAMES
+
+
+def is_application_state(path: str) -> bool:
+    r"""Report whether a path lies anywhere inside an application's own state directory.
+
+    Every segment is checked, not just the last one, because the marker is usually an
+    ancestor: the transcripts live in ``.claude\projects\<project name>`` and the session
+    records in ``.codex\sessions\2026\05\21``, where the *leaf* is named after a project
+    or a date and says nothing. Guarding on the leaf alone caught none of them.
+    """
+    for segment in path.replace("\\", "/").split("/"):
+        lowered = segment.strip().lower()
+        if not lowered:
+            continue
+        if lowered in APPLICATION_STATE_NAMES:
+            return True
+        if any(token in lowered for token in APPLICATION_STATE_TOKENS):
+            return True
+    return False
 
 
 def holds_structured_children(ctx: DirectoryContext) -> bool:
@@ -123,6 +169,11 @@ def may_claim_generic(ctx: DirectoryContext) -> tuple[bool, str]:
     """
     if is_drive_root(ctx.path):
         return False, "drive root"
+
+    # Checked before the dataset-root exemption: an application that writes a `state.json`
+    # beside its logs must not thereby become a dataset.
+    if is_application_state(ctx.path):
+        return False, "inside an application state directory"
 
     if looks_like_dataset_root(ctx):
         return True, ""

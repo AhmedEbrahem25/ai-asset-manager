@@ -54,6 +54,7 @@ class TestDriveRoots:
         corpus = tmp_path / "drive" / "projects" / "thesis" / "corpus"
         _write(corpus / "a.jsonl", '{"t": 1}\n' * 40)
         _write(corpus / "b.jsonl", '{"t": 2}\n' * 40)
+        _write(corpus / "_stats.json", '{"records": 80}')
         (tmp_path / "drive" / "unrelated").mkdir(parents=True)
 
         claimed = [item.root_path for item in detectors.detect_tree(walk(tmp_path))]
@@ -142,6 +143,7 @@ class TestTheRegressionsThisFixed:
         corpus = project / "data" / "civil_law" / "knowledge_base"
         _write(corpus / "articles.jsonl", '{"a": 1}\n' * 40)
         _write(corpus / "clauses.jsonl", '{"b": 2}\n' * 40)
+        _write(corpus / "_stats.json", '{"records": 80}')
 
         found = {r.root_path: r for r in detectors.detect_tree(walk(tmp_path))}
 
@@ -178,6 +180,64 @@ class TestTheRegressionsThisFixed:
         dataset = tmp_path / "traffic"
         _images(dataset, 400, prefix="frame")
         _write(dataset / "labels" / "frame0.txt", "0 0.5 0.5 0.2 0.2\n")
+
+        found = detectors.detect_tree(walk(tmp_path))
+        assert [item.root_path for item in found] == [str(dataset)]
+
+    def test_a_session_log_store_is_not_a_corpus(
+        self, tmp_path: Path, detectors, walk
+    ) -> None:
+        """Chat transcripts are line-delimited JSON, which is what a corpus is too.
+
+        The rule that let these through accepted "there is a ``.jsonl`` here" as evidence
+        that a ``.jsonl`` pile was a dataset. Fifty of them were catalogued on the
+        development machine before it was caught.
+        """
+        store = tmp_path / ".claude" / "projects" / "some-project"
+        for name in ("39d3e5c3.jsonl", "40813648.jsonl", "52bef5ad.jsonl"):
+            _write(store / name, '{"role": "user"}\n' * 40_000)
+
+        assert detectors.detect_tree(walk(tmp_path)) == []
+
+    def test_the_marker_may_be_an_ancestor(self, tmp_path: Path, detectors, walk) -> None:
+        """The leaf is named after a project or a date; the ancestor is the giveaway."""
+        for parent in (
+            tmp_path / ".codex" / "sessions" / "2026" / "05" / "21",
+            tmp_path / "AppData" / "Roaming" / "Code" / "User" / "globalStorage" / "chats",
+        ):
+            for name in ("a.jsonl", "b.jsonl"):
+                _write(parent / name, '{"m": 1}\n' * 40_000)
+
+        assert detectors.detect_tree(walk(tmp_path)) == []
+
+    def test_an_application_state_directory_is_never_a_dataset(
+        self, tmp_path: Path, detectors, walk
+    ) -> None:
+        # IDE telemetry is CSV, and a `state.json` beside it must not rescue it either.
+        logs = tmp_path / "IdeaIC2024" / "log"
+        _write(logs / "state.json", "{}")
+        for name in ("events.csv", "metrics.csv"):
+            _write(logs / name, "a,b,c\n" + "1,2,3\n" * 40_000)
+
+        assert detectors.detect_tree(walk(tmp_path)) == []
+
+    def test_resource_folders_are_not_a_class_taxonomy(
+        self, tmp_path: Path, detectors, walk
+    ) -> None:
+        """Android's `data/res` is a folder-per-qualifier tree full of icons."""
+        for qualifier in ("drawable-hdpi", "drawable-mdpi", "color-night", "anim-watch"):
+            _images(tmp_path / "res" / qualifier, 30, prefix="ic_")
+
+        assert detectors.detect_tree(walk(tmp_path)) == []
+
+    def test_a_class_layout_still_counts_with_a_class_list(
+        self, tmp_path: Path, detectors, walk
+    ) -> None:
+        """The other side of that trade: a declared class list is enough on its own."""
+        dataset = tmp_path / "flowers"
+        for name in ("rose", "tulip", "daisy"):
+            _images(dataset / name, 30, prefix=name)
+        _write(dataset / "classes.txt", "rose\ntulip\ndaisy\n")
 
         found = detectors.detect_tree(walk(tmp_path))
         assert [item.root_path for item in found] == [str(dataset)]

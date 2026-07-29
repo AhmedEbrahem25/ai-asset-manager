@@ -24,6 +24,7 @@ from ai_asset_manager.backend.detectors.base import (
     DetectionResult,
 )
 from ai_asset_manager.backend.detectors.boundary import (
+    DATASET_MANIFESTS,
     MIN_UNSTRUCTURED_IMAGES,
     looks_like_dataset_root,
 )
@@ -100,15 +101,17 @@ _LABEL_DIRS = ("labels", "annotations", "masks", "gt", "ground_truth", "captions
 def _assembled(ctx: DirectoryContext) -> bool:
     """Report whether a pile of media shows signs of having been assembled deliberately.
 
-    Three things count, and each is an act by whoever built the dataset rather than a
-    by-product of downloading files into a folder: a split layout, a manifest naming the
-    contents, or a directory of labels sitting beside the media.
+    Two things count, and each is an act by whoever built the dataset rather than a
+    by-product of an application writing files into a folder: a split layout or a manifest
+    naming the contents, or a directory of labels sitting beside the media.
+
+    The evidence must be *independent of the payload*. An earlier version accepted "there
+    is a ``.jsonl`` here", which for a text corpus is satisfied by the very files being
+    judged -- so every chat transcript, agent session store and IDE telemetry folder on the
+    machine qualified. Fifty of them were catalogued as NLP datasets before this was
+    caught. A rule that a directory can satisfy merely by existing is not a rule.
     """
-    if looks_like_dataset_root(ctx):
-        return True
-    if ctx.has_any_dir(*_LABEL_DIRS):
-        return True
-    return bool(ctx.glob("*.csv") or ctx.glob("*.jsonl") or ctx.glob("*.parquet"))
+    return looks_like_dataset_root(ctx) or ctx.has_any_dir(*_LABEL_DIRS)
 
 
 def find_split_dirs(ctx: DirectoryContext) -> list[str]:
@@ -599,6 +602,15 @@ class ImageClassificationDetector(BaseDetector):
         is_imagenet = sum(
             1 for name in unique_classes if self.WNID_RE.match(name)
         ) >= max(3, len(unique_classes) // 2)
+
+        # A folder-per-name layout full of images is the single most common shape on a
+        # disk, and almost none of it is a dataset: Android resource qualifiers
+        # (`drawable-hdpi`, `color-night`), icon sets binned by pixel size, a semester of
+        # lecture folders. All of those cleared every count-based threshold. What a real
+        # ImageFolder dataset has and none of them do is a deliberate declaration -- split
+        # directories, a class list, or WordNet ids.
+        if not split_dirs and not is_imagenet and not ctx.has_any(*DATASET_MANIFESTS):
+            return []
 
         return [
             self._result(
