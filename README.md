@@ -42,9 +42,69 @@ ImageNet, KITTI, Waymo, nuScenes, BDD100K, Cityscapes, MOT, CrowdHuman, Open Ima
 ADE20K, LVIS, HuggingFace datasets, MNIST-family IDX archives, plus generic classification,
 segmentation, tracking, video, audio, tabular and NLP corpora.
 
+**Security datasets**, which have no config file and no `images/` tree and so are invisible
+to every other rule here — packet captures (PCAP/PCAPNG), NetFlow and Argus flow records,
+Zeek and Suricata output, Windows event logs and Sysmon, malware corpora, threat-intel and
+IOC collections, CTF material, and labelled intrusion tables recognised from their column
+names. Public corpora are named where they are recognised: UNSW-NB15, CICIDS2017,
+CSE-CIC-IDS2018, NSL-KDD, KDD99, CTU-13, DARPA, MAWI, TON_IoT, Bot-IoT, IoT-23, USTC-TFC,
+MalMem, EMBER, VirusShare, Malimg and around forty more.
+
+**Archives** — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`, `.tar.xz`, and `.7z`/`.rar`
+with the optional readers installed. Catalogued from the table of contents and *never
+unpacked*: a packed model, a YOLO or COCO or HuggingFace dataset, a tracking benchmark, a
+training run, a capture corpus or a malware sample set are each recognised from their member
+names. A 5.6 GB zip is listed in about a tenth of a second, because that means reading the
+central directory and nothing else.
+
 **The work around them** — AI projects (the codebase that trained the thing), training runs
 from TensorBoard, Weights & Biases, MLflow, Ultralytics and Lightning, checkpoints, and
 labelling projects from CVAT, Label Studio, Roboflow and Supervisely.
+
+## Archives are listed, never extracted
+
+Nothing is ever unpacked to disk. No temporary directory is created, and disk usage during
+archive inspection is zero.
+
+Three levels of access, and the boundaries between them are the design:
+
+1. **The listing** — name, size, member names and sizes. For a zip that is the central
+   directory at the end of the file, which is proportional to the number of members rather
+   than to their size. For a tar it is the member headers.
+2. **Named metadata, in memory** — a `config.json`, `data.yaml` or `dataset_info.json`
+   *inside* the archive is read into a bytes object and parsed, provided it is on the
+   allow-list and small enough to be configuration. It never touches the filesystem.
+3. **Never** — images, video, weights, checkpoints, parquet, arrow, ONNX, GGUF,
+   safetensors. Not at any size, for any reason. The gate is an allow-list of names, not a
+   deny-list of extensions, so an unfamiliar format is refused by default.
+
+Cost is bounded twice over, by member count and by bytes decompressed, because an archive is
+an untrusted input and "how long does listing this take" must have an answer that does not
+depend on what is inside it. Pointed at a 44 MB zip bomb, the scanner reports that the
+contents could not be listed and moves on.
+
+## One CSV is not a dataset
+
+Security data is a pile of CSVs, or a pile of logs, or a pile of JSON — and so is half of a
+normal machine. So the security detector never concludes anything from one observation.
+Each independent signal carries a weight; a directory becomes a dataset when the total
+clears a threshold *and* either several signals agree or one of them is both strong and
+plural. A folder with a single `conn.log` is declined. The same folder with nine other Zeek
+logs beside it is not.
+
+Two further guards: a shelf holding CICIDS2017 and UNSW-NB15 defers to its contents rather
+than reporting itself as one dataset, and a directory that is an application writing its own
+state is never a corpus however corpus-shaped it looks.
+
+Malware corpora get a stricter rule again, because the ordinary words are all taken. A
+`samples/` folder, a `DLLs/` folder, ten executables and a few hash-named cache entries are
+what normal software looks like — on the development machine those signals found "malware
+corpora" in Python, in Ghidra, in Zoom, in a video editor and in a 14 GB NLP project, and
+because a claim suppresses everything beneath it, the last of those hid twenty-two training
+runs and eleven checkpoints. So at least one *unambiguous* observation is now required — a
+directory that is about malware, a corpus where most files are named after their own digest,
+or a recognised public dataset — and there must be something to analyse. Executables and
+hash manifests can support that conclusion; they can no longer reach it.
 
 ## Where an asset starts and stops
 
@@ -179,7 +239,52 @@ score** with specific findings.
 | `aam inventory --group-by task\|domain\|family\|drive\|…` | Cut it a different way. |
 | `aam inventory --export csv\|json\|markdown` | Take it elsewhere. |
 | `aam inventory projects\|experiments` | Which codebases and training runs produced all this? |
+| `aam inventory security\|archives` | Security corpora; packed models and datasets. |
+| `aam duplicates` | Which models are installed more than once, and by what? |
 | `aam where <name>` | Where did I put it? |
+
+## Why does it think that?
+
+Every asset records the evidence its detector matched on, so a classification can be checked
+rather than trusted. `aam show <id>` prints it:
+
+```
+Why  Speech Recognition — confidence 95%
+  ✓ encoder.onnx
+  ✓ decoder.onnx
+  ✓ tokens.txt
+  ✓ declared task automatic-speech-recognition
+```
+
+The same block records where the asset came from. Applications ship the models they embed
+under names like `model.tflite`, because inside the application there is only one — and
+catalogued verbatim, fifty of them produce fifty identical rows. The path is not silent
+about it, though: `AppData\Local\Google\Chrome\User Data\screen_ai\...\model.tflite` names
+the vendor, the product, the component and the task in that order. So it is read, and the
+row reads **Chrome ScreenAI OCR Model** with `Vendor: Google`, `Product: Chrome`,
+`Source: chrome` beside it.
+
+The name on disk is never changed — a folder you created is still findable by the name you
+gave it. The derived name is a display name, and it is only ever offered when the existing
+one says nothing.
+
+## Duplicate installations
+
+Applications do not repackage the models they embed, so Chrome, Edge, VS Code and Cursor all
+carry byte-identical copies of the same optimisation model. `aam duplicates` finds them from
+the catalogue alone — no file is opened and nothing is hashed, so it is instant after a scan:
+
+```console
+$ aam duplicates --across-apps
+Model                        Installs   One copy   Reclaimable   Found in
+Chrome Optimization Guide    6 copies     8.1 MiB      40.5 MiB   Chrome, Edge, Cursor, VS Code, …
+```
+
+Where an earlier duplicate pass left content digests behind the grouping uses them and the
+row is marked ✓; otherwise it groups on the shape of the asset, which is enough to recognise
+one build shipped six times. The reclaim figure is an upper bound: an application that finds
+its bundled model gone will usually fetch it again, so this is space that can be *recovered*
+rather than space being wasted. Nothing here deletes anything.
 
 Assets are also linked to each other. Containment is derived after every scan — a checkpoint
 inside a run was produced by it, a model inside a project belongs to it — and an adapter is

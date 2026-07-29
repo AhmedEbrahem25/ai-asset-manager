@@ -9,9 +9,10 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 #: Directory entries never descended into. Matching is case-insensitive on the raw
 #: directory name. Keeping this as a frozenset makes the walker's hot-path check O(1).
@@ -151,8 +152,12 @@ class Settings(BaseSettings):
         description="Descending into symlinked directories risks cycles; off by default.",
     )
     max_depth: int = Field(default=40, ge=1, description="Guards against pathological trees.")
-    excluded_dirs: frozenset[str] = DEFAULT_EXCLUDED_DIRS
-    excluded_file_globs: tuple[str, ...] = DEFAULT_EXCLUDED_FILE_GLOBS
+    # `NoDecode` on both: pydantic-settings JSON-decodes collection fields before any
+    # validator runs, so `AAM_EXCLUDED_DIRS=node_modules,build` raised a SettingsError
+    # rather than reaching the comma-splitting validator written for exactly that form.
+    # Opting out of the decode step is what lets these be set the way a person would.
+    excluded_dirs: Annotated[frozenset[str], NoDecode] = DEFAULT_EXCLUDED_DIRS
+    excluded_file_globs: Annotated[tuple[str, ...], NoDecode] = DEFAULT_EXCLUDED_FILE_GLOBS
 
     # -- hashing ------------------------------------------------------------
     quick_hash_chunk_bytes: int = Field(default=4 * 1024 * 1024, ge=64 * 1024)
@@ -212,6 +217,16 @@ class Settings(BaseSettings):
             value = [part.strip() for part in value.split(",") if part.strip()]
         if isinstance(value, (list, tuple, set, frozenset)):
             return frozenset(str(item).lower() for item in value)
+        return value
+
+    @field_validator("excluded_file_globs", mode="before")
+    @classmethod
+    def _split_excluded_file_globs(cls, value: object) -> object:
+        """Accept a comma-separated list, the way an environment variable carries one."""
+        if isinstance(value, str):
+            return tuple(part.strip() for part in value.split(",") if part.strip())
+        if isinstance(value, (list, set, frozenset)):
+            return tuple(str(item) for item in value)
         return value
 
     @field_validator("log_level", mode="before")

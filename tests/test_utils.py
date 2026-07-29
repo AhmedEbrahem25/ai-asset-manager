@@ -341,3 +341,36 @@ class TestDirectoryExclusion:
         walked = set(tree.nodes)
         assert str(tmp_path / "AppData" / "Local" / "Temp") not in walked
         assert str(tmp_path / "Datasets" / "temp") in walked
+
+
+class TestSettingsFromTheEnvironment:
+    """The collection settings have to be settable the way a person would set them.
+
+    pydantic-settings JSON-decodes collection fields before validators run, so these
+    used to raise SettingsError for the comma-separated form their own validators were
+    written to accept.
+    """
+
+    def test_excluded_dirs_accepts_a_comma_separated_list(self, monkeypatch) -> None:
+        from ai_asset_manager.config import Settings
+
+        monkeypatch.setenv("AAM_EXCLUDED_DIRS", "node_modules, Build ,.venv")
+
+        assert Settings().excluded_dirs == frozenset({"node_modules", "build", ".venv"})
+
+    def test_excluded_file_globs_accepts_a_comma_separated_list(self, monkeypatch) -> None:
+        from ai_asset_manager.config import Settings
+
+        monkeypatch.setenv("AAM_EXCLUDED_FILE_GLOBS", "*.tmp, *.part")
+
+        assert Settings().excluded_file_globs == ("*.tmp", "*.part")
+
+    def test_defaults_survive_when_the_variables_are_unset(self, monkeypatch) -> None:
+        from ai_asset_manager.config import DEFAULT_EXCLUDED_FILE_GLOBS, Settings
+
+        monkeypatch.delenv("AAM_EXCLUDED_DIRS", raising=False)
+        monkeypatch.delenv("AAM_EXCLUDED_FILE_GLOBS", raising=False)
+        settings = Settings()
+
+        assert "node_modules" in settings.excluded_dirs
+        assert settings.excluded_file_globs == DEFAULT_EXCLUDED_FILE_GLOBS

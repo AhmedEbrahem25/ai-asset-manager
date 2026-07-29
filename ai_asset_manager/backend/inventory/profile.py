@@ -64,6 +64,7 @@ def build_profile(
         created_at=asset.created_at,
         is_missing=asset.is_missing,
         detector=asset.detector,
+        evidence=dict(asset.evidence or {}),
         tags=tuple(tag.name for tag in asset.tags),
         model=_model_facts(model),
         dataset=_dataset_facts(dataset),

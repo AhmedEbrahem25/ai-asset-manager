@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 from fnmatch import fnmatch
-from pathlib import Path, PurePath
+from pathlib import PurePath
 
 #: Extensions that hold model weights or dataset payloads rather than configuration.
 PAYLOAD_EXTENSIONS: frozenset[str] = frozenset(
@@ -161,7 +161,7 @@ def is_incomplete_marker(name: str) -> bool:
 
 def is_payload_file(name: str) -> bool:
     """Report whether a filename looks like a weight or data payload."""
-    return Path(name).suffix.lower() in PAYLOAD_EXTENSIONS
+    return os.path.splitext(name)[1].lower() in PAYLOAD_EXTENSIONS
 
 
 def classify_extension(name: str) -> str | None:
@@ -171,7 +171,10 @@ def classify_extension(name: str) -> str | None:
         One of ``"image"``, ``"video"``, ``"audio"``, ``"text"``, ``"point_cloud"``,
         ``"payload"``, or ``None`` when the extension is unrecognised.
     """
-    suffix = Path(name).suffix.lower()
+    # `os.path.splitext` rather than `Path(...).suffix`: this runs once per file per
+    # content census, and building a PurePath to read the end of a string is the most
+    # expensive way to do it.
+    suffix = os.path.splitext(name)[1].lower()
     if suffix in IMAGE_EXTENSIONS:
         return "image"
     if suffix in VIDEO_EXTENSIONS:

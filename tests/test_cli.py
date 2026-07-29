@@ -6,6 +6,7 @@ argument wiring, the service calls and the rendering are all exercised together.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,37 @@ class TestFirstImpression:
         assert result.exit_code == 0
         assert "aam scan --auto" in result.output
         assert "aam inventory missing" in result.output
+
+    def test_asking_for_the_guide_does_not_create_a_database(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        """The welcome screen sends new users to `guide`; it must stay a pure answer.
+
+        Creating the schema here made the first command a new user runs print a line of
+        INFO logging about twelve tables before the worked examples.
+        """
+        database = tmp_path / "should-not-exist.db"
+
+        result = runner.invoke(app, ["--database", str(database), "guide"])
+
+        assert result.exit_code == 0
+        assert "aam scan --auto" in result.output
+        assert not database.exists()
+
+    def test_help_offers_no_completion_flags_on_windows(self, runner: CliRunner) -> None:
+        """Typer's completion flags raise on Windows, so they must not be advertised there.
+
+        shellingham cannot detect the shell on 'nt': both --install-completion and
+        --show-completion die with "Shell detection not implemented for 'nt'".
+        """
+        result = runner.invoke(app, ["--help"])
+
+        assert result.exit_code == 0
+        if sys.platform == "win32":
+            assert "--install-completion" not in result.output
+            assert "--show-completion" not in result.output
+        else:
+            assert "--install-completion" in result.output
 
     def test_help_groups_commands_into_panels(self, runner: CliRunner) -> None:
         result = runner.invoke(app, ["--help"])
@@ -365,6 +397,29 @@ class TestShow:
 
         assert result.exit_code == 1
 
+    def test_reports_the_same_health_as_the_inventory(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        """`show` must explain a low score, not leave the user to guess at it.
+
+        Only parser warnings are persisted as findings, so reading that table alone made
+        `show` silent about an asset the health view had just scored 65/100.
+        """
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        F.make_incomplete_download(assets, "half-downloaded")
+        database = tmp_path / "catalog.db"
+        runner.invoke(app, ["--database", str(database), "scan", str(assets), "-q"])
+
+        health = runner.invoke(app, ["--database", str(database), "inventory", "health"])
+        shown = runner.invoke(app, ["--database", str(database), "show", "1"])
+
+        assert shown.exit_code == 0
+        assert "Health" in shown.output
+        # The finding the health view reports is the finding `show` explains.
+        assert "unfinished download" in health.output
+        assert "unfinished download" in shown.output
+
 
 class TestStats:
     def test_summarises_catalogue(self, catalogue, runner: CliRunner) -> None:
@@ -433,6 +488,34 @@ class TestInventory:
         result = runner.invoke(app, ["--database", str(database), "inventory", category])
 
         assert result.exit_code == 0
+
+    def test_a_filter_that_matches_nothing_blames_the_filter(
+        self, catalogue, runner: CliRunner
+    ) -> None:
+        """The advice has to match the reason, or it sends the user in a circle.
+
+        `--drive Z:` used to report "no assets found for 'all'" and suggest running
+        `aam inventory all` -- which is what had just been run.
+        """
+        _assets, database = catalogue
+
+        result = runner.invoke(
+            app, ["--database", str(database), "inventory", "--drive", "Z:"]
+        )
+
+        assert result.exit_code == 0
+        assert "--drive Z:" in result.output
+        assert "Run 'aam scan" not in result.output
+
+    def test_an_empty_category_points_at_the_full_list(
+        self, catalogue, runner: CliRunner
+    ) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "inventory", "speech"])
+
+        assert result.exit_code == 0
+        assert "aam inventory all" in result.output
 
     def test_llm_excludes_datasets(self, catalogue, runner: CliRunner) -> None:
         _assets, database = catalogue
@@ -605,7 +688,8 @@ class TestInventory:
         )
 
         assert result.exit_code == 0
-        assert "No assets found" in result.output
+        assert "catalogue is empty" in result.output.lower()
+        assert "aam scan" in result.output
 
 
 class TestWhere:
@@ -624,6 +708,51 @@ class TestWhere:
 
         assert result.exit_code == 0
         assert "Nothing matching" in result.output
+
+
+class TestLegacyConsoleEncoding:
+    """A cp1252 console must not be able to kill a command mid-render.
+
+    The development machine's console is cp1252, and `aam inventory` died part-way through
+    a table with `UnicodeEncodeError` — after printing half of it. Two entirely ordinary
+    inputs reach it: a model whose name is not Latin-1, and this CLI's own tick marks.
+    """
+
+    def test_streams_are_reconfigured_to_utf8(self) -> None:
+        import io
+
+        from ai_asset_manager.cli import _force_utf8_streams
+
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        original, sys.stdout = sys.stdout, stream
+        try:
+            _force_utf8_streams()
+            assert stream.encoding == "utf-8"
+            assert stream.errors == "replace"
+        finally:
+            sys.stdout = original
+
+    def test_a_stream_without_reconfigure_is_left_alone(self) -> None:
+        """Under pytest's capture the streams are not real files. That is not an error."""
+        from ai_asset_manager.cli import _force_utf8_streams
+
+        original, sys.stdout = sys.stdout, object()
+        try:
+            _force_utf8_streams()  # must not raise
+        finally:
+            sys.stdout = original
+
+    def test_a_non_latin1_name_renders(self, tmp_path: Path, runner: CliRunner) -> None:
+        assets = tmp_path / "assets"
+        F.make_hf_model(assets, "Qwen2.5-日本語-0.5B")
+        database = tmp_path / "db.sqlite"
+
+        scan = runner.invoke(app, ["--database", str(database), "scan", str(assets)])
+        assert scan.exit_code == 0
+
+        result = runner.invoke(app, ["--database", str(database), "list"])
+        assert result.exit_code == 0
+        assert result.exception is None
 
 
 def test_version(tmp_path: Path, runner: CliRunner) -> None:

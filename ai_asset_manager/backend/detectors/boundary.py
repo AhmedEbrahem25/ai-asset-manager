@@ -38,6 +38,12 @@ CONTAINER_NAMES: frozenset[str] = frozenset(
         "downloads", "download", "desktop", "documents", "my documents", "pictures",
         "videos", "music", "onedrive", "dropbox", "google drive", "my drive",
         "public", "users", "home", "shared", "temp", "tmp", "new folder",
+        # Windows profile roots. Every installed application writes under these, so any
+        # rule that reads a whole subtree finds a little of everything here — and a claim
+        # on one of them suppresses every real asset beneath it. `AppData\Roaming` was
+        # reported as a 14 GB host-log corpus on the strength of four scattered log files,
+        # and took thirty-two models down with it.
+        "appdata", "roaming", "local", "locallow", "programs", "packages",
         # Development containers
         "projects", "project", "repos", "repositories", "repo", "git", "source",
         "src", "code", "work", "workspace", "dev", "sandbox", "playground",
@@ -73,10 +79,10 @@ DATASET_MANIFESTS: tuple[str, ...] = (
 #: name does.
 APPLICATION_STATE_NAMES: frozenset[str] = frozenset(
     {
-        "log", "logs", "telemetry", "crashes", "crashreports", "diagnostics",
-        "sessions", "settingslogs", "history", "subagents",
-        "workspacestorage", "globalstorage", "localstorage", "sessionstorage",
-        "eventlog", "journal", "traces",
+        "log", "logs", "telemetry", "crashes", "crashreports", "crashdumps",
+        "diagnostics", "dumps", "minidumps", "sessions", "settingslogs", "history",
+        "subagents", "workspacestorage", "globalstorage", "localstorage",
+        "sessionstorage", "localstate", "eventlog", "journal", "traces",
         # Agent and editor state directories. Their transcripts are line-delimited JSON
         # sitting in per-project folders, which is a corpus down to the byte.
         ".claude", ".codex", ".cursor", ".aider", ".continue", ".gemini",

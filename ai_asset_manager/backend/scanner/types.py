@@ -11,7 +11,6 @@ import os
 import stat as stat_module
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 
 from ai_asset_manager.backend.utils.paths import classify_extension, is_payload_file
 
@@ -37,13 +36,19 @@ class FileEntry:
 
     @property
     def extension(self) -> str:
-        """Return the lower-cased file extension, including the leading dot."""
-        return Path(self.name).suffix.lower()
+        """Return the lower-cased file extension, including the leading dot.
+
+        ``os.path.splitext`` rather than ``Path(...).suffix``: this is read millions of
+        times per scan — the extension histograms every dataset detector consults are built
+        from it — and constructing a ``PurePath`` to look at the end of a string cost 66
+        seconds of a whole-machine scan on the development machine.
+        """
+        return os.path.splitext(self.name)[1].lower()
 
     @property
     def stem(self) -> str:
         """Return the filename without its final extension."""
-        return Path(self.name).stem
+        return os.path.splitext(self.name)[0]
 
     @property
     def is_payload(self) -> bool:

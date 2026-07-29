@@ -25,6 +25,11 @@ class AssetKind(StrEnum):
     EXPERIMENT = "experiment"
     #: A labelling project: CVAT, Label Studio, Roboflow, Supervisely.
     ANNOTATION_PROJECT = "annotation_project"
+    #: A packed model, dataset or run: a ``.zip``, ``.tar.gz`` or ``.7z`` catalogued from
+    #: its table of contents. Distinct from the thing inside it, because the archive is
+    #: what occupies the disk and what a user would move or delete, and because nothing
+    #: was unpacked to confirm what it would become.
+    ARCHIVE = "archive"
     PAPER = "paper"
     TRAINING_CONFIG = "training_config"
     UNKNOWN = "unknown"
@@ -124,6 +129,22 @@ class DatasetFormat(StrEnum):
     AUDIO = "audio"
     NLP = "nlp"
     TABULAR = "tabular"
+    # -- security ----------------------------------------------------------
+    #: Raw packet captures: PCAP, PCAPNG, and the Zeek/Suricata output derived from them.
+    NETWORK_CAPTURE = "network_capture"
+    #: Aggregated flow records rather than packets: NetFlow, IPFIX, Argus, bidirectional
+    #: flow CSVs. Distinct from a capture because the payload is gone.
+    NETWORK_FLOW = "network_flow"
+    #: A labelled attack/benign corpus: UNSW-NB15, CICIDS2017, NSL-KDD and their kin.
+    INTRUSION_DETECTION = "intrusion_detection"
+    #: Host telemetry: Windows event logs, Sysmon, authentication and audit logs.
+    HOST_LOG = "host_log"
+    #: Malware samples, their features, or images derived from them.
+    MALWARE = "malware"
+    #: Indicators of compromise and threat feeds.
+    THREAT_INTEL = "threat_intel"
+    #: Capture-the-flag challenge material.
+    CTF = "ctf"
     CUSTOM = "custom"
     UNKNOWN = "unknown"
 

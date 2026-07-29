@@ -262,6 +262,10 @@ class AssetProfile:
     created_at: datetime | None = None
     is_missing: bool = False
     detector: str | None = None
+    #: What the detector observed, exactly as it recorded it. The only source of truth for
+    #: assets that carry neither model nor dataset details — an archive, whose contents were
+    #: listed rather than read, has nowhere else to put what the listing said.
+    evidence: Mapping[str, Any] = field(default_factory=dict)
     tags: tuple[str, ...] = ()
     model: ModelFacts | None = None
     dataset: DatasetFacts | None = None

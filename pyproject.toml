@@ -40,6 +40,9 @@ dependencies = [
 
 [project.optional-dependencies]
 desktop = ["pywebview>=5.3"]
+# Listing .7z and .rar archives. Everything else -- zip, tar and its compressed forms --
+# is read with the standard library, so the scanner is fully functional without these.
+archives = ["py7zr>=0.22", "rarfile>=4.2"]
 # Only needed to build the standalone executable; see scripts/build_exe.py.
 build = ["pyinstaller>=6.10"]
 dev = [
@@ -104,7 +107,9 @@ plugins = ["pydantic.mypy"]
 exclude = ["ai_asset_manager/backend/database/alembic/"]
 
 [[tool.mypy.overrides]]
-module = ["webview.*", "watchdog.*"]
+# py7zr and rarfile are optional extras: the archive reader imports them inside a
+# try/except and degrades to a name-and-size listing when they are absent.
+module = ["webview.*", "watchdog.*", "py7zr.*", "rarfile.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

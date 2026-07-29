@@ -21,12 +21,14 @@ from ai_asset_manager.backend.detectors.annotation import (
     RoboflowExportDetector,
     SupervisleyProjectDetector,
 )
+from ai_asset_manager.backend.detectors.archives import ArchiveDetector
 from ai_asset_manager.backend.detectors.base import (
     PRIORITY_DATASET_GENERIC,
     AssetDetector,
     DetectionResult,
 )
 from ai_asset_manager.backend.detectors.boundary import may_claim_generic
+from ai_asset_manager.backend.detectors.cybersecurity import CyberSecurityDatasetDetector
 from ai_asset_manager.backend.detectors.datasets import (
     Bdd100kDetector,
     CityscapesDetector,
@@ -97,7 +99,10 @@ def default_detectors() -> list[AssetDetector]:
         LabelStudioDetector(),
         RoboflowExportDetector(),
         SupervisleyProjectDetector(),
-        # Named dataset layouts.
+        # Named dataset layouts. The security detector sits with them rather than in the
+        # generic band because it matches on structure that only a security corpus has —
+        # packet captures, Zeek logs, intrusion-table columns — not on a pile of files.
+        CyberSecurityDatasetDetector(),
         CocoDetector(),
         YoloDetector(),
         PascalVocDetector(),
@@ -117,6 +122,8 @@ def default_detectors() -> list[AssetDetector]:
         MediaCollectionDetector(),
         TabularDatasetDetector(),
         LooseWeightsDetector(),
+        # Archives share the loose-weights band; see PRIORITY_ARCHIVE.
+        ArchiveDetector(),
     ]
 
 

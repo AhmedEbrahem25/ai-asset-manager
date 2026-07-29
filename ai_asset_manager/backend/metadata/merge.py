@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ai_asset_manager.backend.detectors.base import DetectionResult
+from ai_asset_manager.backend.detectors.explain import explain
+from ai_asset_manager.backend.identity import identify
 from ai_asset_manager.backend.metadata.records import (
     AssetRecord,
     DatasetFacts,
@@ -172,6 +174,13 @@ def build_dataset_facts(
         description=facts.get("description"),
     )
     resolved.extra = _collect_extra(facts, _DATASET_EXTRA_KEYS)
+    # A handful of the detector's own observations belong with the dataset rather than in
+    # the asset's evidence blob: taxonomy plugins receive dataset facts and never see
+    # evidence, so "which public dataset is this?" has to arrive here to be usable.
+    for key in _DATASET_EVIDENCE_KEYS:
+        value = evidence.get(key)
+        if value is not None and key not in resolved.extra:
+            resolved.extra[key] = value
     return resolved
 
 
@@ -192,6 +201,9 @@ _MODEL_EXTRA_KEYS = frozenset(
 _DATASET_EXTRA_KEYS = frozenset(
     {"cache_layout", "is_hf_cache", "annotation_files", "split_dirs", "card_tags", "languages"}
 )
+
+#: Detector observations copied from the detection's evidence onto the dataset itself.
+_DATASET_EVIDENCE_KEYS = ("known_dataset", "security_dataset", "evidence_score")
 
 
 def _collect_extra(facts: FactSet, keys: frozenset[str]) -> dict[str, Any]:
@@ -336,13 +348,50 @@ def build_asset_record(
         record.subkind = record.subkind or record.model.model_type.value
 
     record.evidence["provenance"] = facts.provenance()
+    _apply_identity(record, detection)
+    record.evidence["explanation"] = explain(record, detection)
     return record
+
+
+def _apply_identity(record: AssetRecord, detection: DetectionResult) -> None:
+    r"""Attach vendor, product, source and — where it helps — a better name.
+
+    Runs after everything else so it can see what the parsers found. A model that declared
+    a repository id has already told us who made it and needs no help; one called ``model``
+    inside ``Google\\Chrome\\User Data\\screen_ai`` has told us nothing, and the path has
+    told us everything.
+
+    The derived name goes to ``display_name`` rather than ``name``. ``name`` is what was
+    read off the disk and stays that way — a user searching for the folder they created
+    must still find it — while ``display_name`` is what the inventory shows.
+    """
+    identity = identify(
+        record.root_path,
+        name=record.display_name or record.name,
+        is_single_file=record.is_single_file,
+    )
+    if identity.is_empty:
+        return
+
+    record.evidence["identity"] = identity.as_dict()
+    if identity.display_name and not record.display_name:
+        record.display_name = identity.display_name
 
 
 #: Kinds that describe a *container of work* rather than a weight file or a corpus, and so
 #: carry neither model nor dataset details.
+#:
+#: An archive is here for a sharper reason than the rest: its contents were listed, not
+#: read. Attaching model details to a ``.zip`` that appears to hold weights would invent an
+#: architecture and a parameter count from a filename, and the whole point of the archive
+#: reader is that it does not open what it has not unpacked.
 _STRUCTURAL_KINDS = frozenset(
-    {AssetKind.PROJECT, AssetKind.EXPERIMENT, AssetKind.ANNOTATION_PROJECT}
+    {
+        AssetKind.PROJECT,
+        AssetKind.EXPERIMENT,
+        AssetKind.ANNOTATION_PROJECT,
+        AssetKind.ARCHIVE,
+    }
 )
 
 #: Extensions that hold annotations rather than media.

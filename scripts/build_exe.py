@@ -235,6 +235,15 @@ def _run(executable: Path, arguments: list[str]) -> str:
     return result.stdout + result.stderr
 
 
+#: Documentation shipped beside the binary. The user guide is included because the zip is
+#: what gets handed to someone, and a binary whose instructions live in a repository they
+#: have not been given is a binary with no instructions.
+DOCS: tuple[tuple[Path, str], ...] = (
+    (Path("README.md"), "README.md"),
+    (Path("docs/user-guide.md"), "USER-GUIDE.md"),
+)
+
+
 def make_archive(executable: Path, version: str, *, onefile: bool) -> Path:
     """Zip the build for handing to somebody else."""
     archive = DIST_DIR / f"aam-{version}-windows-x64.zip"
@@ -247,7 +256,12 @@ def make_archive(executable: Path, version: str, *, onefile: bool) -> Path:
             for path in sorted(source.rglob("*")):
                 if path.is_file():
                     bundle.write(path, arcname=str(Path("aam") / path.relative_to(source)))
-        bundle.write(PROJECT_ROOT / "README.md", arcname="README.md")
+
+        for relative, arcname in DOCS:
+            document = PROJECT_ROOT / relative
+            if not document.exists():
+                raise SystemExit(f"Refusing to ship an archive without {relative}.")
+            bundle.write(document, arcname=arcname)
 
     return archive
 

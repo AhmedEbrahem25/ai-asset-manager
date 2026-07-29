@@ -7,6 +7,7 @@ the HTTP API from drifting apart.
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -101,7 +102,12 @@ app = typer.Typer(
         "Everything here is read-only: nothing is ever moved, renamed or deleted."
     ),
     no_args_is_help=False,
-    add_completion=True,
+    # Typer's completion flags depend on shellingham detecting the shell, which it cannot
+    # do on Windows: both --install-completion and --show-completion raise
+    # "Shell detection not implemented for 'nt'". Advertising a flag in --help that can
+    # only fail is worse than not offering it, so they are hidden on the platform where
+    # they do not work and kept on the platforms where they do.
+    add_completion=os.name != "nt",
     rich_markup_mode="rich",
 )
 roots_app = typer.Typer(
@@ -111,10 +117,31 @@ roots_app = typer.Typer(
 )
 app.add_typer(roots_app, name="roots", rich_help_panel=PANEL_START)
 
-# Windows consoles default to a legacy code page, and model names routinely contain
-# characters it cannot encode. Rich handles the encoding; forcing it here means a name
-# with CJK or emoji in it prints as replacement characters instead of aborting the
-# command with a UnicodeEncodeError.
+def _force_utf8_streams() -> None:
+    """Make the output streams able to carry the characters this CLI actually prints.
+
+    Windows consoles default to a legacy code page — cp1252 here — and neither Rich nor
+    Typer changes the encoding of the stream underneath them. Anything outside that page
+    raises ``UnicodeEncodeError`` *mid-render*, so the command dies after printing half a
+    table. The two ways to hit it are equally ordinary: a model whose name is not Latin-1,
+    and this CLI's own ✓ marks.
+
+    ``errors="replace"`` is the belt to that braces. A console that genuinely cannot
+    represent a character should show a replacement glyph, never abort the command.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            # A redirected or already-detached stream; the default encoding stands.
+            pass
+
+
+_force_utf8_streams()
+
 console = Console(soft_wrap=False)
 error_console = Console(stderr=True, style="bold red")
 logger = get_logger(__name__)
@@ -127,7 +154,12 @@ _database_override: Path | None = None
 #: Commands that answer without touching the catalogue. They must not create one:
 #: a freshly downloaded binary being asked its version should not leave an empty
 #: database and a data directory behind on a machine it may never run on again.
-COMMANDS_WITHOUT_DATABASE = frozenset({"version"})
+#:
+#: `guide` is here for the same reason and one more: it is the command the welcome
+#: screen sends a new user to, so it is often the very first thing run. Creating a
+#: schema for it makes that first run answer a question about worked examples with a
+#: line of INFO logging about twelve tables.
+COMMANDS_WITHOUT_DATABASE = frozenset({"version", "guide"})
 
 #: Commands that must not trigger the automatic catch-up scan. Either they do their own
 #: scanning, or they are meant to report the catalogue exactly as it stands - `status`
@@ -857,11 +889,41 @@ def show(
                 table.add_row(record.relpath, format_bytes(record.size_bytes))
             console.print(table)
 
-        if asset.health_findings:
-            console.print("\n[bold]Health[/bold]")
-            for finding in asset.health_findings:
-                colour = {"error": "red", "warning": "yellow"}.get(finding.severity, "dim")
-                console.print(f"  [{colour}]{finding.severity}[/{colour}] {finding.message}")
+        _print_health(session, asset)
+
+
+def _print_health(session: Any, asset: Asset) -> None:
+    """Report what is wrong with one asset, and what to do about it.
+
+    Runs the same rule set as ``aam inventory health`` rather than reading the stored
+    findings, because only parser warnings are persisted. Reading the table alone meant
+    an asset that ``inventory missing`` scored 65/100 showed nothing here at all — which
+    is exactly the moment a user runs ``aam show`` to find out why.
+    """
+    from ai_asset_manager.backend.inventory import build_profile, load_file_summaries
+    from ai_asset_manager.backend.inventory.render import SEVERITY_MARKS
+    from ai_asset_manager.backend.taxonomy import default_registry
+
+    summaries = load_file_summaries(session, [asset.id])
+    profile = build_profile(
+        asset, asset.model_details, asset.dataset_details, summaries.get(asset.id)
+    )
+    report = default_registry().check_health(profile)
+
+    if report.evaluated and report.findings:
+        colour = {"error": "red", "warning": "yellow"}.get(report.status, "green")
+        console.print(f"\n[bold]Health[/bold]  [{colour}]{report.score}/100[/{colour}]")
+        for finding in sorted(report.findings, key=lambda item: -item.severity.rank):
+            mark = SEVERITY_MARKS.get(finding.severity, "·")
+            console.print(f"  {mark} {finding.message}")
+            if finding.fix_hint:
+                console.print(f"    [dim]{finding.fix_hint}[/dim]")
+    elif report.evaluated:
+        console.print("\n[bold]Health[/bold]  [green]100/100[/green]  [dim]nothing to report[/dim]")
+
+    # Parser warnings are stored rather than recomputed, so they are listed separately.
+    for stored in asset.health_findings:
+        console.print(f"  [yellow]![/yellow] {stored.message}")
 
 
 def _detail_panel(asset: Asset) -> Panel:
@@ -933,10 +995,48 @@ def _detail_panel(asset: Asset) -> Panel:
             suffix = f" … (+{extra_count})" if extra_count > 0 else ""
             lines.extend(["", f"[dim]Classes: {preview}{suffix}[/dim]"])
 
+    lines.extend(_identity_lines(asset))
+    lines.extend(_explanation_lines(asset))
+
     if asset.tags:
         lines.extend(["", "Tags".ljust(14) + ", ".join(tag.name for tag in asset.tags)])
 
     return Panel("\n".join(lines), border_style="cyan", expand=False)
+
+
+def _identity_lines(asset: Asset) -> list[str]:
+    """Render where an asset came from, when the scanner worked it out."""
+    identity = (asset.evidence or {}).get("identity")
+    if not isinstance(identity, dict):
+        return []
+
+    rows = [
+        (label, identity.get(key))
+        for label, key in (
+            ("Vendor", "vendor"),
+            ("Product", "product"),
+            ("Component", "component"),
+            ("Source", "source"),
+        )
+    ]
+    shown = [f"{label:<14}{value}" for label, value in rows if value]
+    return ["", *shown] if shown else []
+
+
+def _explanation_lines(asset: Asset) -> list[str]:
+    """Render why the asset was classified the way it was.
+
+    The answer to "why does it think this is an OCR model?", which until now could only be
+    had by reading the detector's source.
+    """
+    from ai_asset_manager.backend.detectors.explain import explanation_of
+
+    found = explanation_of(asset.evidence or {})
+    if found is None:
+        return []
+
+    heading, signals = found
+    return ["", f"[bold]Why[/bold]  {heading}", *(f"  [green]✓[/green] {s}" for s in signals)]
 
 
 @app.command(rich_help_panel=PANEL_LIBRARY)
@@ -1075,9 +1175,10 @@ def inventory(
                     "[dim]Every catalogued asset is complete.[/dim]"
                 )
             else:
-                console.print(
-                    f"[dim]No assets found for {category!r}. "
-                    "Run 'aam scan <folder>' first, or try 'aam inventory all'.[/dim]"
+                _report_empty_inventory(
+                    category,
+                    {"--drive": drive, "--framework": framework,
+                     "--task": task, "--domain": domain},
                 )
             return
 
@@ -1123,6 +1224,39 @@ def inventory(
                 f"\n[dim]Showing {len(report.items)} of {report.summary.total_assets}. "
                 "Raise --limit to see more.[/dim]"
             )
+
+
+def _report_empty_inventory(category: str, filters: dict[str, str | None]) -> None:
+    """Explain an inventory that came back empty.
+
+    Which advice is right depends on why it was empty, and blaming the category for a
+    filter's work sends the user the wrong way: `--drive Z:` used to report "no assets
+    found for 'all'" and suggest running `aam inventory all`, which is what they had
+    just run. So a filtered query names its filters, and only a genuinely empty
+    catalogue is told to go and scan something.
+    """
+    applied = {flag: value for flag, value in filters.items() if value}
+
+    if applied:
+        shown = ", ".join(f"{flag} {value}" for flag, value in applied.items())
+        console.print(f"[dim]Nothing in the catalogue matches {shown}.[/dim]")
+        console.print(
+            f"[dim]Drop a filter, or run 'aam inventory {category}' "
+            "to see the category unfiltered.[/dim]"
+        )
+        return
+
+    if category.strip().lower() == "all":
+        console.print(
+            "[dim]The catalogue is empty. Run 'aam scan <folder>' to fill it, "
+            "or 'aam discover' to find where your assets live.[/dim]"
+        )
+        return
+
+    console.print(
+        f"[dim]Nothing catalogued under {category!r}. "
+        "Try 'aam inventory all' to see every category that does have something.[/dim]"
+    )
 
 
 def _report_unknown_category(category: str) -> None:
@@ -1274,6 +1408,84 @@ def stats() -> None:
             console.print(table)
 
 
+@app.command(rich_help_panel=PANEL_LIBRARY)
+def duplicates(
+    across_apps: Annotated[
+        bool,
+        typer.Option(
+            "--across-apps",
+            help="Only show models that several different applications each ship a copy of.",
+        ),
+    ] = False,
+    min_size: Annotated[
+        str,
+        typer.Option("--min-size", help="Ignore models whose single copy is below this size."),
+    ] = "256KB",
+    limit: Annotated[int, typer.Option("--limit", help="How many groups to show.")] = 20,
+) -> None:
+    """List models installed more than once, and what a single copy weighs.
+
+    Answers from the catalogue alone — no file is opened and nothing is hashed, so this is
+    instant after a scan. Where an earlier duplicate pass left content digests behind, the
+    grouping uses them and the row is marked verified; otherwise it groups on the shape of
+    the asset, which is enough to recognise the same build shipped by six applications.
+
+    The reclaim figure is an upper bound. An application that finds its bundled model gone
+    will usually fetch it again, so this is space that can be recovered rather than space
+    that is being wasted. Nothing here deletes anything.
+    """
+    from ai_asset_manager.backend.duplicate import (
+        find_duplicate_installations,
+        total_reclaimable,
+    )
+
+    try:
+        floor = parse_size(min_size)
+    except ValueError:
+        error_console.print(f"Cannot read a size from {min_size!r}. Try '50MB'.")
+        raise typer.Exit(code=1) from None
+
+    with session_scope() as session:
+        groups = find_duplicate_installations(
+            session, min_unit_bytes=floor, across_applications_only=across_apps
+        )
+
+    if not groups:
+        scope = "installed by more than one application" if across_apps else "installed twice"
+        console.print(f"[dim]Nothing {scope} above {format_bytes(floor)}.[/dim]")
+        return
+
+    table = Table(box=None, pad_edge=False, header_style="bold")
+    table.add_column("Model", style="cyan", max_width=38, overflow=OVERFLOW)
+    table.add_column("Installs", justify="right")
+    table.add_column("One copy", justify="right")
+    table.add_column("Reclaimable", justify="right")
+    table.add_column("Found in", overflow="fold")
+
+    for group in groups[:limit]:
+        sources = ", ".join(group.sources[:6])
+        if len(group.sources) > 6:
+            sources += f" (+{len(group.sources) - 6})"
+        table.add_row(
+            group.display_name + (" [green]✓[/green]" if group.verified_by_hash else ""),
+            f"{group.install_count} copies",
+            format_bytes(group.unit_size_bytes),
+            format_bytes(group.reclaimable_bytes),
+            sources or "[dim]unknown[/dim]",
+        )
+
+    console.print(table)
+    console.print(
+        f"\n[bold]{len(groups)}[/bold] duplicated installation(s); "
+        f"up to [bold]{format_bytes(total_reclaimable(groups))}[/bold] recoverable."
+    )
+    if any(not group.verified_by_hash for group in groups):
+        console.print(
+            "[dim]Rows without ✓ were grouped on size and file layout rather than "
+            "content hashes.[/dim]"
+        )
+
+
 @app.command(rich_help_panel=PANEL_ABOUT)
 def version(
     plugins: Annotated[
@@ -1346,6 +1558,8 @@ def guide() -> None:
             ("aam inventory datasets", "just the datasets"),
             ("aam inventory projects", "the codebases that produced all this"),
             ("aam inventory experiments", "training runs, W&B, MLflow, TensorBoard"),
+            ("aam inventory security", "captures, logs, malware and intrusion corpora"),
+            ("aam inventory archives", "packed models and datasets, listed not unpacked"),
             ("aam inventory --tree", "the shape of the library"),
             ("aam inventory --details", "everything known, including what relates to what"),
         )),
@@ -1356,9 +1570,11 @@ def guide() -> None:
             ("aam inventory --drive F: --sort size", "biggest things on one drive"),
             ("aam inventory --storage", "where the space has gone"),
         )),
-        ("Is any of it broken?", (
+        ("Is any of it broken, or doubled up?", (
             ("aam inventory missing", "only what needs attention"),
             ("aam inventory health", "score and findings for everything"),
+            ("aam duplicates", "models installed more than once"),
+            ("aam duplicates --across-apps", "the same model shipped by several apps"),
         )),
         ("Finding and exporting", (
             ("aam where qwen", "where did I put it?"),

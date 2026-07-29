@@ -36,6 +36,10 @@ PRIORITY_DATASET_SPECIFIC = 60  # COCO, KITTI, Cityscapes and other named layout
 PRIORITY_DATASET_GENERIC = 40  # classification trees, loose media collections
 PRIORITY_FRAMEWORK = 35  # TensorFlow SavedModel, OpenVINO, TensorRT
 PRIORITY_LOOSE_WEIGHTS = 20  # individual weight files with no surrounding structure
+#: Archives share the loose-weights band deliberately. Both describe *files* that are
+#: assets rather than directories that contain them, and a directory holding one of each
+#: holds two assets — which only happens if neither band suppresses the other.
+PRIORITY_ARCHIVE = PRIORITY_LOOSE_WEIGHTS
 
 
 @dataclass(slots=True)
