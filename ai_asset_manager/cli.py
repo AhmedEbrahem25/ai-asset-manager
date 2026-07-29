@@ -68,14 +68,42 @@ from ai_asset_manager.backend.utils.paths import shorten_path
 from ai_asset_manager.config import get_settings
 from ai_asset_manager.logging_conf import configure_logging
 
+#: Help panels, so that twelve commands read as three short groups rather than one long
+#: alphabetical list. Which group a command is in is the first thing that tells a new user
+#: what to run.
+PANEL_START = "Getting started"
+PANEL_LIBRARY = "Your library"
+PANEL_ABOUT = "About"
+
+#: The inventory command has fifteen options. Split into three panels they read as a
+#: menu; in one flat list they read as a wall, and the useful ones get lost.
+OPTS_FILTER = "Choosing what to show"
+OPTS_LAYOUT = "Choosing how to show it"
+OPTS_OUTPUT = "Taking it elsewhere"
+
 app = typer.Typer(
     name="aam",
-    help="AI Asset Manager — catalogue, search and clean up local AI models and datasets.",
-    no_args_is_help=True,
-    add_completion=False,
+    help=(
+        "[bold]AI Asset Manager[/bold] - find out what AI models and datasets are on this "
+        "machine, what they are for, and which of them are broken."
+    ),
+    # Typer renders the epilog as flowing text and collapses single newlines, so this has
+    # to read as a sentence rather than a table. The table lives in `aam guide`.
+    epilog=(
+        "Start with [cyan]aam scan --auto[/cyan], then [cyan]aam inventory[/cyan]. "
+        "[cyan]aam guide[/cyan] has worked examples. "
+        "Everything here is read-only: nothing is ever moved, renamed or deleted."
+    ),
+    no_args_is_help=False,
+    add_completion=True,
+    rich_markup_mode="rich",
 )
-roots_app = typer.Typer(help="Manage the folders that get scanned.", no_args_is_help=True)
-app.add_typer(roots_app, name="roots")
+roots_app = typer.Typer(
+    help="Manage the folders that get scanned.",
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+)
+app.add_typer(roots_app, name="roots", rich_help_panel=PANEL_START)
 
 # Windows consoles default to a legacy code page, and model names routinely contain
 # characters it cannot encode. Rich handles the encoding; forcing it here means a name
@@ -85,8 +113,16 @@ console = Console(soft_wrap=False)
 error_console = Console(stderr=True, style="bold red")
 
 
-def _bootstrap(*, verbose: bool = False, database: Path | None = None) -> None:
-    """Configure logging and ensure the database exists."""
+#: Commands that answer without touching the catalogue. They must not create one:
+#: a freshly downloaded binary being asked its version should not leave an empty
+#: database and a data directory behind on a machine it may never run on again.
+COMMANDS_WITHOUT_DATABASE = frozenset({"version"})
+
+
+def _bootstrap(
+    *, verbose: bool = False, database: Path | None = None, schema: bool = True
+) -> None:
+    """Configure logging and, unless told otherwise, ensure the database exists."""
     settings = get_settings()
     configure_logging(
         "DEBUG" if verbose else settings.log_level,
@@ -94,30 +130,125 @@ def _bootstrap(*, verbose: bool = False, database: Path | None = None) -> None:
     )
     if database is not None:
         engine = configure_engine(f"sqlite+pysqlite:///{database.as_posix()}")
-    else:
+    elif schema:
         settings.ensure_data_dir()
         engine = get_engine()
-    init_database(engine)
+    else:
+        return
+
+    if schema:
+        init_database(engine)
 
 
-@app.callback()
+def _version_callback(value: bool) -> None:
+    """Print the version and exit, for the conventional ``--version`` flag."""
+    if value:
+        console.print(f"AI Asset Manager {__version__}")
+        raise typer.Exit
+
+
+@app.callback(invoke_without_command=True)
 def main_callback(
+    ctx: typer.Context,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable debug logging.")] = False,
     database: Annotated[
         Path | None, typer.Option("--database", help="Use a specific SQLite file.")
     ] = None,
+    # Consumed entirely by its eager callback, which prints and exits before this body
+    # runs; the parameter exists so that Typer registers the flag at all.
+    show_version: Annotated[
+        bool,
+        typer.Option("--version", callback=_version_callback, is_eager=True,
+                     help="Show the version and exit."),
+    ] = False,
 ) -> None:
     """Set up logging and the database before any command runs."""
-    _bootstrap(verbose=verbose, database=database)
+    bare = ctx.invoked_subcommand is None
+    _bootstrap(
+        verbose=verbose,
+        database=database,
+        schema=not bare and ctx.invoked_subcommand not in COMMANDS_WITHOUT_DATABASE,
+    )
+    if bare:
+        _welcome(database)
+        raise typer.Exit
 
 
-@app.command()
-def version() -> None:
-    """Show the version and where data is stored."""
+def _welcome(database: Path | None) -> None:
+    """Greet a bare ``aam`` with the next thing worth doing.
+
+    Printing the help text here would be the conventional choice and the less useful one.
+    Someone typing ``aam`` with nothing after it does not want a list of twelve commands;
+    they want to know whether this thing has anything to tell them yet, and if not, how to
+    make it. So the answer depends on whether a catalogue exists.
+    """
     settings = get_settings()
-    console.print(f"[bold]AI Asset Manager[/bold] {__version__}")
-    console.print(f"Database: {settings.db_path}")
-    console.print(f"Data directory: {settings.data_dir}")
+    path = database or settings.db_path
+
+    total = _catalogue_size(path)
+
+    if total is None:
+        _print_first_run()
+        return
+
+    console.print(f"[bold]AI Asset Manager[/bold] [dim]{__version__}[/dim]")
+    console.print(f"{total:,} asset(s) catalogued.\n")
+    console.print("  [cyan]aam inventory[/cyan]          what you have, and what it is for")
+    console.print("  [cyan]aam inventory --tree[/cyan]   the shape of the whole library")
+    console.print("  [cyan]aam inventory missing[/cyan]  what needs attention")
+    console.print("  [cyan]aam where <name>[/cyan]       where did I put it?")
+    console.print("\n[dim]aam --help for everything, aam guide for worked examples.[/dim]")
+
+
+def _catalogue_size(path: Path) -> int | None:
+    """Return how many assets are catalogued, or ``None`` if there is no catalogue yet.
+
+    Deliberately opens the file read-only and by hand rather than going through the ORM:
+    asking "is there anything here?" must not be the thing that creates an empty database
+    on a machine the tool has only just been copied to.
+    """
+    if not path.exists():
+        return None
+
+    import sqlite3
+
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            row = connection.execute(
+                "SELECT count(*) FROM assets WHERE is_missing = 0"
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return int(row[0]) if row else 0
+
+
+def _print_first_run() -> None:
+    """Explain what this is and offer concrete folders to scan."""
+    from ai_asset_manager.backend.scanner.locations import likely_asset_folders
+
+    console.print(f"[bold]AI Asset Manager[/bold] [dim]{__version__}[/dim]")
+    console.print(
+        "Nothing catalogued yet. Point it at a folder and it works out what is in there "
+        "-\nmodels, datasets, adapters, which are duplicates and which are broken.\n"
+    )
+
+    found = likely_asset_folders()
+    if found:
+        table = Table(box=None, pad_edge=False, show_header=False)
+        table.add_column(style="cyan", no_wrap=True)
+        table.add_column(style="dim")
+        for location in found[:8]:
+            table.add_row(str(location.path), location.label)
+
+        console.print("Found these on this machine:")
+        console.print(table)
+        console.print("\n  [cyan]aam scan --auto[/cyan]   [dim]catalogue all of them[/dim]")
+    else:
+        console.print("  [cyan]aam scan D:\\Models[/cyan]   [dim]catalogue a folder[/dim]")
+
+    console.print(
+        "\n[dim]Scanning only reads. Nothing is moved, renamed or deleted, ever.[/dim]"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -125,12 +256,16 @@ def version() -> None:
 # --------------------------------------------------------------------------
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_START)
 def scan(
     paths: Annotated[
         list[Path] | None,
         typer.Argument(help="Folders to scan. Defaults to the registered roots."),
     ] = None,
+    auto: Annotated[
+        bool,
+        typer.Option("--auto", help="Scan the model and dataset caches found on this machine."),
+    ] = False,
     full: Annotated[
         bool, typer.Option("--full", help="Re-parse every asset, ignoring fingerprints.")
     ] = False,
@@ -141,11 +276,34 @@ def scan(
         bool, typer.Option("--quiet", "-q", help="Suppress the progress bar.")
     ] = False,
 ) -> None:
-    """Scan folders and update the catalogue.
+    r"""Scan folders and update the catalogue.
 
     Rescans are incremental: assets whose files are unchanged are skipped entirely.
+
+    [bold]Examples[/bold]
+
+      [cyan]aam scan --auto[/cyan]              every cache this tool can find
+      [cyan]aam scan D:\\Models --add[/cyan]     a folder, remembered for next time
+      [cyan]aam scan[/cyan]                     everything remembered
     """
     targets = [str(path) for path in paths] if paths else None
+
+    if auto:
+        from ai_asset_manager.backend.scanner.locations import likely_asset_folders
+
+        discovered = likely_asset_folders()
+        if not discovered:
+            error_console.print(
+                "Found no known model or dataset folders on this machine.\n"
+                "Pass one directly: aam scan D:\\Models"
+            )
+            raise typer.Exit(code=1)
+
+        console.print(f"Found {len(discovered)} location(s):")
+        for location in discovered:
+            console.print(f"  [cyan]{location.path}[/cyan]  [dim]{location.label}[/dim]")
+        console.print()
+        targets = (targets or []) + [str(location.path) for location in discovered]
 
     with session_scope() as session:
         service = ScanService(session)
@@ -157,8 +315,9 @@ def scan(
 
         if not targets and not service.list_roots(enabled_only=True):
             error_console.print(
-                "No scan roots configured. Pass folders directly, or add them with "
-                "'aam roots add <path>'."
+                "No scan roots configured.\n"
+                "Try 'aam scan --auto' to catalogue the caches on this machine, pass a "
+                "folder directly, or add one with 'aam roots add <path>'."
             )
             raise typer.Exit(code=1)
 
@@ -310,7 +469,7 @@ def roots_remove(
 # --------------------------------------------------------------------------
 
 
-@app.command("list")
+@app.command("list", rich_help_panel=PANEL_LIBRARY)
 def list_assets(
     kind: Annotated[str | None, typer.Option(help="model, dataset, adapter, checkpoint.")] = None,
     model_type: Annotated[str | None, typer.Option(help="llm, vision_language, embedding…")] = None,
@@ -405,7 +564,7 @@ def _asset_table(assets: Sequence[Asset], *, show_paths: bool) -> Table:
     return table
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_LIBRARY)
 def show(
     asset_id: Annotated[int, typer.Argument(help="Asset id, as shown by 'aam list'.")],
     files: Annotated[bool, typer.Option("--files", help="List the asset's files.")] = False,
@@ -509,7 +668,7 @@ def _detail_panel(asset: Asset) -> Panel:
     return Panel("\n".join(lines), border_style="cyan", expand=False)
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_LIBRARY)
 def inventory(
     category: Annotated[
         str,
@@ -522,54 +681,69 @@ def inventory(
     ] = "all",
     group_by: Annotated[
         str | None,
-        typer.Option("--group-by", "-g", help=f"Group by: {', '.join(GROUP_BY_FIELDS)}."),
+        typer.Option("--group-by", "-g", help=f"Group by: {', '.join(GROUP_BY_FIELDS)}.",
+                     rich_help_panel=OPTS_LAYOUT),
     ] = None,
     sort: Annotated[
-        str, typer.Option("--sort", help=f"Sort by: {', '.join(SORT_FIELDS)}.")
+        str, typer.Option("--sort", help=f"Sort by: {', '.join(SORT_FIELDS)}.",
+                     rich_help_panel=OPTS_LAYOUT)
     ] = "size",
     ascending: Annotated[
-        bool, typer.Option("--asc", help="Sort ascending instead of descending.")
+        bool, typer.Option("--asc", help="Sort ascending instead of descending.",
+                     rich_help_panel=OPTS_LAYOUT)
     ] = False,
     drive: Annotated[
-        str | None, typer.Option("--drive", help="Restrict to one drive, e.g. 'F:'.")
+        str | None, typer.Option("--drive", help="Restrict to one drive, e.g. 'F:'.",
+                     rich_help_panel=OPTS_FILTER)
     ] = None,
     framework: Annotated[
-        str | None, typer.Option("--framework", help="Restrict to one framework.")
+        str | None, typer.Option("--framework", help="Restrict to one framework.",
+                     rich_help_panel=OPTS_FILTER)
     ] = None,
     task: Annotated[
-        str | None, typer.Option("--task", help="Restrict to one task, e.g. 'object_detection'.")
+        str | None, typer.Option("--task", help="Restrict to one task, e.g. 'object_detection'.",
+                     rich_help_panel=OPTS_FILTER)
     ] = None,
     domain: Annotated[
-        str | None, typer.Option("--domain", help="Restrict to one domain, e.g. 'medical'.")
+        str | None, typer.Option("--domain", help="Restrict to one domain, e.g. 'medical'.",
+                     rich_help_panel=OPTS_FILTER)
     ] = None,
     details: Annotated[
-        bool, typer.Option("--details", "-d", help="Show everything known about each asset.")
+        bool, typer.Option("--details", "-d", help="Show everything known about each asset.",
+                     rich_help_panel=OPTS_LAYOUT)
     ] = False,
     tree: Annotated[
-        bool, typer.Option("--tree", "-t", help="Show the library as a tree.")
+        bool, typer.Option("--tree", "-t", help="Show the library as a tree.",
+                     rich_help_panel=OPTS_LAYOUT)
     ] = False,
     tree_by: Annotated[
         str | None,
-        typer.Option("--tree-by", help=f"Tree nesting, comma-separated: {', '.join(TREE_LEVELS)}."),
+        typer.Option("--tree-by", help=f"Tree nesting, comma-separated: {', '.join(TREE_LEVELS)}.",
+                     rich_help_panel=OPTS_LAYOUT),
     ] = None,
     limit: Annotated[
-        int | None, typer.Option("--limit", "-n", help="Show only the first N assets.")
+        int | None, typer.Option("--limit", "-n", help="Show only the first N assets.",
+                     rich_help_panel=OPTS_FILTER)
     ] = None,
     include_missing: Annotated[
-        bool, typer.Option("--include-missing", help="Include assets no longer on disk.")
+        bool, typer.Option("--include-missing", help="Include assets no longer on disk.",
+                     rich_help_panel=OPTS_FILTER)
     ] = False,
     export: Annotated[
         str | None,
         typer.Option(
             "--export",
             help=f"Export instead of printing: {', '.join(available_formats())}.",
+            rich_help_panel=OPTS_OUTPUT,
         ),
     ] = None,
     output: Annotated[
-        Path | None, typer.Option("--output", "-o", help="File to write the export to.")
+        Path | None, typer.Option("--output", "-o", help="File to write the export to.",
+                     rich_help_panel=OPTS_OUTPUT)
     ] = None,
     storage: Annotated[
-        bool, typer.Option("--storage", help="Also show the storage breakdown by drive.")
+        bool, typer.Option("--storage", help="Also show the storage breakdown by drive.",
+                     rich_help_panel=OPTS_OUTPUT)
     ] = False,
 ) -> None:
     """List everything in your local AI library, by category.
@@ -579,6 +753,16 @@ def inventory(
 
     Two views take the place of a category: 'health' scores every asset and lists what is
     wrong with it, and 'missing' shows only the assets that need attention.
+
+    [bold]Examples[/bold]
+
+      [cyan]aam inventory[/cyan]                    everything, by category
+      [cyan]aam inventory ocr[/cyan]                which OCR models are installed
+      [cyan]aam inventory --tree[/cyan]             the shape of the library
+      [cyan]aam inventory --details[/cyan]          everything known about each asset
+      [cyan]aam inventory missing[/cyan]            only what needs attention
+      [cyan]aam inventory -g family[/cyan]          grouped by model family
+      [cyan]aam inventory --export csv -o x.csv[/cyan]  take it to a spreadsheet
     """
     view = category.strip().lower()
     health_view = view in ("health", "missing")
@@ -588,10 +772,7 @@ def inventory(
     else:
         categories = resolve_alias(category)
         if categories is None:
-            error_console.print(
-                f"Unknown category {category!r}.\n"
-                f"Try one of: {', '.join(known_aliases())}"
-            )
+            _report_unknown_category(category)
             raise typer.Exit(code=2)
         # "all" means no restriction; passing the full category tuple would also filter
         # out anything whose category came from a plugin no longer installed.
@@ -673,6 +854,36 @@ def inventory(
             )
 
 
+def _report_unknown_category(category: str) -> None:
+    """Explain a category name the taxonomy does not recognise.
+
+    Dumping all seventy selectors — which is what the taxonomy now offers, since plugins
+    add their own — buries the answer. A close match is nearly always what was meant, so
+    that is offered first and the full list is grouped by section behind it.
+    """
+    import difflib
+
+    from ai_asset_manager.backend.inventory import all_categories, all_sections
+
+    aliases = known_aliases()
+    close = difflib.get_close_matches(category.lower().replace("_", "-"), aliases, n=3)
+
+    error_console.print(f"Unknown category {category!r}.")
+
+    if close:
+        console.print(f"\nDid you mean: [cyan]{'[/cyan], [cyan]'.join(close)}[/cyan]?")
+
+    console.print("\n[bold]Everything you can ask for[/bold]")
+    for section in all_sections():
+        names = [category.id for category in all_categories() if category.section == section.id]
+        if names:
+            console.print(f"  [dim]{section.label:<18}[/dim] {', '.join(names)}")
+    console.print(
+        "\n[dim]Plus 'all', 'health', 'missing', any domain name, and the shorthands "
+        f"{', '.join(a for a in aliases if '-' not in a)[:96]}...[/dim]"
+    )
+
+
 def _table_for(items: Sequence[Any], *, details: bool) -> Table:
     """Choose the layout that fits a set of items.
 
@@ -709,7 +920,7 @@ def _export_inventory(
         console.print(f"[dim]{rendered.strip()}[/dim]")
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_LIBRARY)
 def where(
     name: Annotated[str, typer.Argument(help="Part of an asset's name or path.")],
     limit: Annotated[int, typer.Option("--limit", "-n", help="Results to show.")] = 20,
@@ -745,7 +956,7 @@ def where(
         console.print(table)
 
 
-@app.command()
+@app.command(rich_help_panel=PANEL_LIBRARY)
 def stats() -> None:
     """Summarise the catalogue."""
     with session_scope() as session:
@@ -790,6 +1001,101 @@ def stats() -> None:
             for asset in largest:
                 table.add_row(asset.display_name or asset.name, format_bytes(asset.size_bytes))
             console.print(table)
+
+
+@app.command(rich_help_panel=PANEL_ABOUT)
+def version(
+    plugins: Annotated[
+        bool, typer.Option("--plugins", help="Also list the loaded taxonomy plugins.")
+    ] = False,
+) -> None:
+    """Show the version, where data is stored, and what the taxonomy loaded.
+
+    The plugin count is here rather than buried in a debug flag because it is the one
+    number that says whether this build can classify anything. A packaged binary that
+    failed to bundle its plugins still runs, still prints tables, and quietly files every
+    asset as "unclassified" - so it is worth being able to check in one command.
+    """
+    from ai_asset_manager.backend.taxonomy import default_registry
+
+    settings = get_settings()
+    registry = default_registry()
+
+    console.print(f"[bold]AI Asset Manager[/bold] {__version__}")
+    console.print(f"Database: {settings.db_path}")
+    console.print(f"Data directory: {settings.data_dir}")
+    console.print(
+        f"Taxonomy: {len(registry.categories())} categories, "
+        f"{len(registry.tasks())} tasks from {len(registry.plugins())} plugins"
+    )
+
+    if plugins:
+        console.print()
+        table = Table(box=None, pad_edge=False, header_style="bold")
+        table.add_column("Plugin", style="cyan")
+        table.add_column("Categories", justify="right")
+        table.add_column("Provides", style="dim")
+
+        for name in registry.plugins():
+            owned = [
+                category.id
+                for category in registry.categories()
+                if category.id.startswith(name) or name in category.id
+            ]
+            table.add_row(name, str(len(owned)), ", ".join(owned[:3]))
+        console.print(table)
+
+
+@app.command(rich_help_panel=PANEL_ABOUT)
+def guide() -> None:
+    """Show worked examples of the things people actually want to do."""
+    recipes: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+        ("Getting started", (
+            ("aam scan --auto", "catalogue every cache found on this machine"),
+            ("aam scan D:\\Models E:\\Datasets", "catalogue specific folders"),
+            ("aam scan --add D:\\Models", "remember the folder for next time"),
+            ("aam scan", "rescan everything remembered (skips unchanged)"),
+        )),
+        ("What do I have?", (
+            ("aam inventory", "everything, by category"),
+            ("aam inventory llm", "just the language models"),
+            ("aam inventory ocr", "just the OCR models"),
+            ("aam inventory datasets", "just the datasets"),
+            ("aam inventory --tree", "the shape of the library"),
+            ("aam inventory --details", "everything known about each asset"),
+        )),
+        ("Cutting it a different way", (
+            ("aam inventory --group-by task", "grouped by what things are for"),
+            ("aam inventory --group-by family", "grouped by model family"),
+            ("aam inventory --domain medical", "one domain only"),
+            ("aam inventory --drive F: --sort size", "biggest things on one drive"),
+            ("aam inventory --storage", "where the space has gone"),
+        )),
+        ("Is any of it broken?", (
+            ("aam inventory missing", "only what needs attention"),
+            ("aam inventory health", "score and findings for everything"),
+        )),
+        ("Finding and exporting", (
+            ("aam where qwen", "where did I put it?"),
+            ("aam show 12", "one asset in full"),
+            ("aam inventory --export csv -o library.csv", "take it to a spreadsheet"),
+            ("aam inventory --export markdown", "paste it into notes"),
+        )),
+    )
+
+    for heading, entries in recipes:
+        console.print(f"\n[bold]{heading}[/bold]")
+        table = Table(box=None, pad_edge=False, show_header=False, padding=(0, 2, 0, 2))
+        table.add_column(style="cyan", no_wrap=True)
+        table.add_column(style="dim")
+        for command, description in entries:
+            table.add_row(command, description)
+        console.print(table)
+
+    console.print(
+        "\n[dim]Everything above is read-only. This tool never moves, renames or "
+        "deletes a file.[/dim]"
+    )
 
 
 def main() -> None:

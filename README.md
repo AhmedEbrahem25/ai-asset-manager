@@ -149,6 +149,36 @@ question about the file list the scanner already wrote down. The test that prove
 deletes every scanned file and asserts the report still comes back complete, classified and
 health-scored.
 
+## Installing
+
+**As a standalone executable** — no Python needed on the target machine:
+
+```console
+$ python scripts/build_exe.py --clean --zip
+dist\aam\aam.exe  (36.8 MiB)
+dist\aam-0.1.0-windows-x64.zip  (20.4 MiB)
+```
+
+Unzip anywhere and run `aam.exe`. One-directory by default because a one-file build
+unpacks itself to a temporary folder on every run, and a second of start-up is a poor
+trade for a tool whose selling point is answering instantly. `--onefile` is there if you
+would rather hand someone a single file.
+
+The build is not finished until the binary has been run: `scripts/build_exe.py` executes
+it and asserts all 17 taxonomy plugins loaded. That check earns its place — plugins are
+imported by name from a package directory listing, and a frozen bundle has no directory,
+so getting it wrong produces a binary that runs, prints tables, and quietly files every
+asset as "unclassified". `aam version --plugins` reports the same thing at any time.
+
+**From source:**
+
+```console
+$ uv sync --extra dev
+$ uv run aam inventory
+```
+
+`make help` lists the development tasks (`make check`, `make exe`, `make dist`).
+
 ## Status
 
 Under active development. See `docs/` for architecture notes and the roadmap.

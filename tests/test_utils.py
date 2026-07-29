@@ -232,3 +232,51 @@ class TestPaths:
 
         assert len(shorten_path(long_path, 30)) <= 33
         assert shorten_path("short.txt", 30) == "short.txt"
+
+
+class TestKnownLocations:
+    """Where the tool looks when asked to find AI folders by itself."""
+
+    def test_only_existing_directories_are_offered(self) -> None:
+        from ai_asset_manager.backend.scanner.locations import known_locations
+
+        # A suggestion that turns out to be an empty path is worse than no suggestion.
+        for location in known_locations():
+            assert location.path.is_dir()
+            assert location.label
+
+    def test_environment_overrides_win(self, tmp_path, monkeypatch) -> None:
+        from ai_asset_manager.backend.scanner.locations import known_locations
+
+        moved = tmp_path / "hf-on-another-drive"
+        moved.mkdir()
+        monkeypatch.setenv("HF_HOME", str(moved))
+
+        paths = {location.path for location in known_locations()}
+        assert moved.resolve() in paths
+
+    def test_the_same_folder_is_never_offered_twice(self, tmp_path, monkeypatch) -> None:
+        # Several tools share the HuggingFace cache; offering it three times under three
+        # names would be worse than offering it once.
+        from ai_asset_manager.backend.scanner.locations import known_locations
+
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        monkeypatch.setenv("HF_HOME", str(shared))
+        monkeypatch.setenv("TORCH_HOME", str(shared))
+
+        paths = [location.path for location in known_locations()]
+        assert len(paths) == len(set(paths))
+
+    def test_drive_scan_looks_one_level_down_only(self, tmp_path) -> None:
+        from ai_asset_manager.backend.scanner.locations import likely_asset_folders
+
+        (tmp_path / "Models").mkdir()
+        (tmp_path / "Models" / "nested" / "deep").mkdir(parents=True)
+        (tmp_path / "Unrelated").mkdir()
+
+        found = {location.path for location in likely_asset_folders(roots=[tmp_path])}
+
+        assert (tmp_path / "Models").resolve() in found
+        assert (tmp_path / "Models" / "nested").resolve() not in found
+        assert (tmp_path / "Unrelated").resolve() not in found

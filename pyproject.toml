@@ -40,6 +40,8 @@ dependencies = [
 
 [project.optional-dependencies]
 desktop = ["pywebview>=5.3"]
+# Only needed to build the standalone executable; see scripts/build_exe.py.
+build = ["pyinstaller>=6.10"]
 dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",

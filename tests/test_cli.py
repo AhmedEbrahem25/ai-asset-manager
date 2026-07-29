@@ -40,6 +40,79 @@ def catalogue(tmp_path: Path, runner: CliRunner) -> tuple[Path, Path]:
     return assets, database
 
 
+class TestFirstImpression:
+    """What the tool says to someone who has just installed it."""
+
+    def test_bare_invocation_offers_folders_to_scan(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        # A bare `aam` should not print a wall of twelve commands. It should say whether
+        # there is anything to look at yet, and if not, how to make some.
+        result = runner.invoke(app, ["--database", str(tmp_path / "none.db")])
+
+        assert result.exit_code == 0
+        assert "Nothing catalogued yet" in result.output
+        assert "aam scan" in result.output
+
+    def test_bare_invocation_with_a_catalogue_says_what_is_in_it(
+        self, catalogue, runner: CliRunner
+    ) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database)])
+
+        assert result.exit_code == 0
+        assert "asset(s) catalogued" in result.output
+        assert "aam inventory" in result.output
+
+    def test_asking_for_the_version_does_not_create_a_database(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        """A freshly copied binary being asked its version should leave nothing behind."""
+        database = tmp_path / "should-not-exist.db"
+
+        result = runner.invoke(app, ["--database", str(database), "--version"])
+
+        assert result.exit_code == 0
+        assert "AI Asset Manager" in result.output
+        assert not database.exists()
+
+    def test_guide_lists_worked_examples(self, tmp_path: Path, runner: CliRunner) -> None:
+        result = runner.invoke(app, ["--database", str(tmp_path / "db.sqlite"), "guide"])
+
+        assert result.exit_code == 0
+        assert "aam scan --auto" in result.output
+        assert "aam inventory missing" in result.output
+
+    def test_help_groups_commands_into_panels(self, runner: CliRunner) -> None:
+        result = runner.invoke(app, ["--help"])
+
+        assert result.exit_code == 0
+        assert "Getting started" in result.output
+        assert "Your library" in result.output
+        # Start comes before about, or the first thing a new user reads is "version".
+        assert result.output.index("Getting started") < result.output.index("About")
+
+    def test_a_mistyped_category_suggests_the_right_one(
+        self, catalogue, runner: CliRunner
+    ) -> None:
+        _assets, database = catalogue
+
+        result = runner.invoke(app, ["--database", str(database), "inventory", "detecton"])
+
+        assert result.exit_code == 2
+        assert "Did you mean" in result.output
+        assert "detection" in result.output
+
+    def test_scan_with_no_roots_points_at_auto(
+        self, tmp_path: Path, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(app, ["--database", str(tmp_path / "db.sqlite"), "scan"])
+
+        assert result.exit_code != 0
+        assert "--auto" in result.output
+
+
 class TestScan:
     def test_reports_what_it_found(self, tmp_path: Path, runner: CliRunner) -> None:
         assets = tmp_path / "assets"
